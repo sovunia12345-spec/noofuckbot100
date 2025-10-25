@@ -46,12 +46,21 @@ if not test_internet_connection():
     exit(1)
 
 # ================== СОЗДАНИЕ БОТА ==================
+import os
+
+# Получаем токен из переменных окружения
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
+
+if not BOT_TOKEN:
+    print("✕ Ошибка: BOT_TOKEN не установлен")
+    exit(1)
+
 try:
-    bot = telebot.TeleBot('8361526142:AAG_pGNslImHdD1fD49EzmnGt9JxDEg3b6c')
+    bot = telebot.TeleBot(BOT_TOKEN)
     bot_info = bot.get_me()
-    print(f"✅ Бот {bot_info.first_name} создан успешно")
+    print(f"☐ Бот {bot_info.first_name} создан успешно")
 except Exception as e:
-    print(f"❌ Ошибка создания бота: {e}")
+    print(f"✕ Ошибка создания бота: {e}")
     exit(1)
 
 # ================== КОНФИГУРАЦИЯ ==================
@@ -4484,4 +4493,5 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"❌ Ошибка: {e}")
             print("🔄 Перезапуск через 10 секунд...")
+
             time.sleep(10)
