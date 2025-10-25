@@ -1,0 +1,14 @@
+name: noofuckbot
+services:
+  - name: bot
+    module:
+      type: python
+      runtime: python-3.14
+      entrypoint: python bot.py
+      workdir: /app
+    resources:
+      memory: 512
+      cpu: 1000
+    scaling:
+      min: 1
+      max: 1
