@@ -1633,8 +1633,12 @@ def handle_quiz_code(message):
     user_id = str(message.from_user.id)
     code = message.text.strip().upper()
 
-    # Игнорируем команды и другие тексты
-    if len(code) < 4 or code in ["🔙 НАЗАД", "🔙 ОТМЕНА", "НАЗАД", "ОТМЕНА"]:
+    # Игнорируем команды и другие тексты, когда пользователь в других состояниях
+    if (len(code) < 4 or 
+        code in ["🔙 НАЗАД", "🔙 ОТМЕНА", "НАЗАД", "ОТМЕНА"] or
+        user_states.get(user_id) in ['waiting_password', 'creating_broadcast', 
+                                   'creating_lottery', 'waiting_credit_amount',
+                                   'waiting_suggestion', 'shopping']):
         return
 
     # Показываем индикатор обработки
@@ -5221,3 +5225,4 @@ if __name__ == '__main__':
         print("🔄 Перезапускаем бота...")
         time.sleep(5)
         bot.infinity_polling(timeout=60, long_polling_timeout=60)
+
