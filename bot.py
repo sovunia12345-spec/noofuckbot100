@@ -46,22 +46,11 @@ if not test_internet_connection():
     exit(1)
 
 # ================== СОЗДАНИЕ БОТА ==================
-import os
-
-# Получаем токен из переменных окружения
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-
 if not BOT_TOKEN:
-    print("✕ Ошибка: BOT_TOKEN не установлен")
+    print("❌ Ошибка: BOT_TOKEN не установлен")
     exit(1)
-
-try:
-    bot = telebot.TeleBot(BOT_TOKEN)
-    bot_info = bot.get_me()
-    print(f"☐ Бот {bot_info.first_name} создан успешно")
-except Exception as e:
-    print(f"✕ Ошибка создания бота: {e}")
-    exit(1)
+bot = telebot.TeleBot(BOT_TOKEN)
 
 # ================== КОНФИГУРАЦИЯ ==================
 USERS_FILE = 'users.json'
@@ -315,6 +304,10 @@ def init_balance_db():
                 message_text TEXT,
                 message_type TEXT DEFAULT 'text',
                 file_id TEXT,
+                poll_question TEXT,
+                poll_options TEXT,
+                is_anonymous BOOLEAN DEFAULT TRUE,
+                allows_multiple_answers BOOLEAN DEFAULT FALSE,
                 sent_count INTEGER DEFAULT 0,
                 failed_count INTEGER DEFAULT 0,
                 status TEXT DEFAULT 'draft',
@@ -380,6 +373,7 @@ def upgrade_database():
         conn = get_db_connection()
         cursor = conn.cursor()
 
+        # Обновление таблицы users
         cursor.execute("PRAGMA table_info(users)")
         columns = [column[1] for column in cursor.fetchall()]
 
@@ -388,6 +382,22 @@ def upgrade_database():
             cursor.execute('ALTER TABLE users ADD COLUMN google_balance INTEGER DEFAULT 0')
             cursor.execute('UPDATE users SET google_balance = balance WHERE google_balance IS NULL')
             print("✅ Поле google_balance добавлено")
+
+        # Обновление таблицы broadcasts для опросов
+        cursor.execute("PRAGMA table_info(broadcasts)")
+        columns = [column[1] for column in cursor.fetchall()]
+
+        new_columns = {
+            'poll_question': 'TEXT',
+            'poll_options': 'TEXT',
+            'is_anonymous': 'BOOLEAN DEFAULT TRUE',
+            'allows_multiple_answers': 'BOOLEAN DEFAULT FALSE'
+        }
+
+        for column_name, column_type in new_columns.items():
+            if column_name not in columns:
+                cursor.execute(f'ALTER TABLE broadcasts ADD COLUMN {column_name} {column_type}')
+                print(f"✅ Поле {column_name} добавлено в broadcasts")
 
         conn.commit()
         conn.close()
@@ -2007,8 +2017,10 @@ def handle_my_tickets(call):
 
 
 # ================== СИСТЕМА РАССЫЛОК И УВЕДОМЛЕНИЙ ==================
-def create_broadcast(admin_id, message_text, message_type='text', file_id=None, schedule_delay_minutes=0):
-    """Создает рассылку"""
+def create_broadcast(admin_id, message_text, message_type='text', file_id=None,
+                     poll_question=None, poll_options=None, is_anonymous=True,
+                     allows_multiple_answers=False, schedule_delay_minutes=0):
+    """Создает рассылку с поддержкой опросов"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -2017,10 +2029,17 @@ def create_broadcast(admin_id, message_text, message_type='text', file_id=None, 
         if schedule_delay_minutes > 0:
             scheduled_for = (datetime.now() + timedelta(minutes=schedule_delay_minutes)).isoformat()
 
+        # Сериализуем варианты опроса в JSON
+        poll_options_json = json.dumps(poll_options, ensure_ascii=False) if poll_options else None
+
         cursor.execute('''
-            INSERT INTO broadcasts (admin_id, message_text, message_type, file_id, scheduled_for, status)
-            VALUES (?, ?, ?, ?, ?, 'scheduled')
-        ''', (str(admin_id), message_text, message_type, file_id, scheduled_for))
+            INSERT INTO broadcasts (admin_id, message_text, message_type, file_id, 
+                                  poll_question, poll_options, is_anonymous, allows_multiple_answers,
+                                  scheduled_for, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled')
+        ''', (str(admin_id), message_text, message_type, file_id,
+              poll_question, poll_options_json, is_anonymous, allows_multiple_answers,
+              scheduled_for))
 
         broadcast_id = cursor.lastrowid
         conn.commit()
@@ -2033,18 +2052,24 @@ def create_broadcast(admin_id, message_text, message_type='text', file_id=None, 
 
 
 def send_broadcast(broadcast_id):
-    """Отправляет рассылку всем пользователям"""
+    """Отправляет рассылку всем пользователям с поддержкой опросов"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        cursor.execute('SELECT message_text, message_type, file_id FROM broadcasts WHERE id = ?', (broadcast_id,))
+        cursor.execute('''
+            SELECT message_text, message_type, file_id, poll_question, poll_options, 
+                   is_anonymous, allows_multiple_answers 
+            FROM broadcasts WHERE id = ?
+        ''', (broadcast_id,))
+
         broadcast = cursor.fetchone()
 
         if not broadcast:
             return False, "Рассылка не найдена"
 
-        message_text, message_type, file_id = broadcast
+        (message_text, message_type, file_id, poll_question,
+         poll_options_json, is_anonymous, allows_multiple_answers) = broadcast
 
         cursor.execute('SELECT user_id FROM users')
         users = cursor.fetchall()
@@ -2055,10 +2080,23 @@ def send_broadcast(broadcast_id):
         cursor.execute('UPDATE broadcasts SET status = "sending" WHERE id = ?', (broadcast_id,))
         conn.commit()
 
+        # Десериализуем варианты опроса
+        poll_options = json.loads(poll_options_json) if poll_options_json else None
+
         for user_tuple in users:
             user_id = user_tuple[0]
             try:
-                if message_type == 'photo' and file_id:
+                if message_type == 'poll' and poll_question and poll_options:
+                    # Отправляем опрос
+                    bot.send_poll(
+                        chat_id=user_id,
+                        question=poll_question,
+                        options=poll_options,
+                        is_anonymous=is_anonymous if is_anonymous else True,
+                        allows_multiple_answers=allows_multiple_answers if allows_multiple_answers else False,
+                        type='regular'
+                    )
+                elif message_type == 'photo' and file_id:
                     bot.send_photo(user_id, file_id, caption=message_text)
                 elif message_type == 'document' and file_id:
                     bot.send_document(user_id, file_id, caption=message_text)
@@ -2152,6 +2190,7 @@ def admin_broadcast_menu(message):
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("📢 Создать рассылку"))
+    markup.add(types.KeyboardButton("📊 Создать опрос"))  # Новая кнопка
     markup.add(types.KeyboardButton("📊 Статистика рассылок"))
     markup.add(types.KeyboardButton("📋 История рассылок"))
     markup.add(types.KeyboardButton("🎪 Создать лотерею"))
@@ -2186,6 +2225,105 @@ def start_broadcast_creation(message):
         reply_markup=markup,
         parse_mode='Markdown'
     )
+
+
+def start_poll_creation(message):
+    """Начинает процесс создания опроса"""
+    user_id = str(message.from_user.id)
+    user_states[user_id] = 'creating_poll_question'
+
+    instruction = """📊 СОЗДАНИЕ ОПРОСА
+
+Введите вопрос для опроса:
+
+Для отмены нажмите кнопку '🔙 Отмена'"""
+
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("🔙 Отмена"))
+
+    bot.send_message(user_id, instruction, reply_markup=markup)
+
+
+def handle_poll_question(message):
+    """Обрабатывает вопрос опроса"""
+    user_id = str(message.from_user.id)
+
+    if message.text in ["🔙 Отмена", "🔙 Назад", "🔙 В меню"]:
+        user_states[user_id] = None
+        admin_broadcast_menu(message)
+        return
+
+    user_states[user_id] = 'creating_poll_options'
+    user_states[f"{user_id}_poll_question"] = message.text
+
+    instruction = """📋 ВВЕДИТЕ ВАРИАНТЫ ОТВЕТОВ
+
+Введите варианты ответов через запятую:
+
+Пример: 
+Да, Нет, Не знаю
+Вариант 1, Вариант 2, Вариант 3, Вариант 4
+
+Максимум 10 вариантов.
+
+Для отмены нажмите '🔙 Отмена'"""
+
+    bot.send_message(user_id, instruction)
+
+
+def handle_poll_options(message):
+    """Обрабатывает варианты ответов опроса"""
+    user_id = str(message.from_user.id)
+
+    if message.text in ["🔙 Отмена", "🔙 Назад", "🔙 В меню"]:
+        user_states[user_id] = None
+        if f"{user_id}_poll_question" in user_states:
+            del user_states[f"{user_id}_poll_question"]
+        admin_broadcast_menu(message)
+        return
+
+    try:
+        question = user_states.get(f"{user_id}_poll_question")
+        options = [opt.strip() for opt in message.text.split(',') if opt.strip()]
+
+        if len(options) < 2:
+            bot.send_message(user_id, "❌ Нужно как минимум 2 варианта ответа")
+            return
+
+        if len(options) > 10:
+            bot.send_message(user_id, "❌ Максимум 10 вариантов ответа")
+            options = options[:10]
+
+        # Создаем рассылку с опросом
+        broadcast_id = create_broadcast(
+            admin_id=user_id,
+            message_text=f"Опрос: {question}",
+            message_type='poll',
+            poll_question=question,
+            poll_options=options,
+            is_anonymous=True,
+            allows_multiple_answers=False
+        )
+
+        if broadcast_id:
+            success, result = send_broadcast(broadcast_id)
+
+            if success:
+                bot.send_message(user_id, f"✅ Опрос создан и отправлен!\n\n{result}")
+            else:
+                bot.send_message(user_id, f"❌ Опрос создан, но возникли ошибки:\n{result}")
+        else:
+            bot.send_message(user_id, "❌ Ошибка создания опроса")
+
+    except Exception as e:
+        bot.send_message(user_id, f"❌ Ошибка: {e}")
+
+    # Очищаем состояния
+    user_states[user_id] = None
+    if f"{user_id}_poll_question" in user_states:
+        del user_states[f"{user_id}_poll_question"]
+
+    admin_broadcast_menu(message)
 
 
 def handle_admin_broadcast_creation(message):
@@ -2244,7 +2382,7 @@ def handle_admin_broadcast_stats(message):
         stats = cursor.fetchone()
 
         cursor.execute('''
-            SELECT message_text, sent_count, failed_count, sent_at 
+            SELECT message_text, sent_count, failed_count, sent_at, message_type
             FROM broadcasts 
             WHERE status = 'sent'
             ORDER BY sent_at DESC 
@@ -2266,11 +2404,12 @@ def handle_admin_broadcast_stats(message):
 
             stats_text += f"📋 Последние рассылки:\n"
 
-            for i, (msg_text, sent, failed, sent_at) in enumerate(recent_broadcasts, 1):
+            for i, (msg_text, sent, failed, sent_at, msg_type) in enumerate(recent_broadcasts, 1):
                 preview = msg_text[:50] + "..." if len(msg_text) > 50 else msg_text
                 sent_date = datetime.fromisoformat(sent_at).strftime('%d.%m.%Y %H:%M') if sent_at else "Не отправлена"
+                type_emoji = "📊" if msg_type == 'poll' else "📢"
 
-                stats_text += f"{i}. {preview}\n"
+                stats_text += f"{i}. {type_emoji} {preview}\n"
                 stats_text += f"   📤 {sent} отправлено, ❌ {failed} ошибок\n"
                 stats_text += f"   🕒 {sent_date}\n\n"
 
@@ -2284,6 +2423,7 @@ def handle_admin_broadcast_stats(message):
     except Exception as e:
         print(f"❌ Ошибка получения статистики рассылок: {e}")
         bot.send_message(user_id, "❌ Ошибка при загрузке статистики рассылок")
+
 
 def start_quiz_code_creation(message):
     """Начинает процесс создания кодового слова"""
@@ -2313,6 +2453,7 @@ def start_quiz_code_creation(message):
 
     bot.send_message(user_id, instruction, reply_markup=markup)
 
+
 def handle_quiz_code_creation(message):
     """Обработчик создания кодового слова"""
     user_id = str(message.from_user.id)
@@ -2327,9 +2468,9 @@ def handle_quiz_code_creation(message):
             parts = message.text.split('|')
             if len(parts) != 4:
                 bot.send_message(user_id,
-                               "❌ Неверный формат. Используйте:\n"
-                               "Код|Название|XP|Макс. использований\n\n"
-                               "Пример: CHEM001|Викторина по химии|20|50")
+                                 "❌ Неверный формат. Используйте:\n"
+                                 "Код|Название|XP|Макс. использований\n\n"
+                                 "Пример: CHEM001|Викторина по химии|20|50")
                 return
 
             code = parts[0].strip().upper()
@@ -2359,13 +2500,13 @@ def handle_quiz_code_creation(message):
 
             if success:
                 bot.send_message(user_id,
-                               f"✅ Код викторины создан!\n\n"
-                               f"🔤 Код: {code}\n"
-                               f"📝 Викторина: {quiz_name}\n"
-                               f"⭐ Опыт: {xp_reward}\n"
-                               f"🎫 Макс. использований: {max_uses}\n"
-                               f"⏰ Срок действия: 1 год\n\n"
-                               f"💡 Пользователи могут ввести этот код в боте для получения опыта!")
+                                 f"✅ Код викторины создан!\n\n"
+                                 f"🔤 Код: {code}\n"
+                                 f"📝 Викторина: {quiz_name}\n"
+                                 f"⭐ Опыт: {xp_reward}\n"
+                                 f"🎫 Макс. использований: {max_uses}\n"
+                                 f"⏰ Срок действия: 1 год\n\n"
+                                 f"💡 Пользователи могут ввести этот код в боте для получения опыта!")
             else:
                 bot.send_message(user_id, "❌ Ошибка создания кода. Возможно, код уже существует.")
 
@@ -2445,6 +2586,7 @@ def show_quiz_stats(message):
         print(f"❌ Ошибка получения статистики викторин: {e}")
         bot.send_message(user_id, "❌ Ошибка при загрузке статистики викторин")
 
+
 def handle_admin_broadcast_history(message):
     """Показывает историю рассылок"""
     user_id = str(message.from_user.id)
@@ -2454,7 +2596,7 @@ def handle_admin_broadcast_history(message):
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT id, message_text, sent_count, failed_count, status, created_at, sent_at
+            SELECT id, message_text, sent_count, failed_count, status, created_at, sent_at, message_type
             FROM broadcasts 
             ORDER BY created_at DESC 
             LIMIT 10
@@ -2467,7 +2609,7 @@ def handle_admin_broadcast_history(message):
             history_text = "📋 ИСТОРИЯ РАССЫЛОК\n\n"
 
             for broadcast in broadcasts:
-                broadcast_id, msg_text, sent_count, failed_count, status, created_at, sent_at = broadcast
+                broadcast_id, msg_text, sent_count, failed_count, status, created_at, sent_at, msg_type = broadcast
 
                 preview = msg_text[:30] + "..." if len(msg_text) > 30 else msg_text
                 created_date = datetime.fromisoformat(created_at).strftime('%d.%m.%Y %H:%M')
@@ -2480,7 +2622,9 @@ def handle_admin_broadcast_history(message):
                     'failed': '❌'
                 }.get(status, '❓')
 
-                history_text += f"{status_emoji} Рассылка #{broadcast_id}\n"
+                type_emoji = "📊" if msg_type == 'poll' else "📢"
+
+                history_text += f"{status_emoji}{type_emoji} Рассылка #{broadcast_id}\n"
                 history_text += f"📝 {preview}\n"
                 history_text += f"📊 Статус: {status}\n"
 
@@ -3463,8 +3607,14 @@ def handle_messages(message):
         elif current_state == 'selecting_lottery_to_draw':
             handle_lottery_selection_for_draw(message)
             return
-        elif current_state == 'creating_quiz_code':  # НОВЫЙ ОБРАБОТЧИК
+        elif current_state == 'creating_quiz_code':
             handle_quiz_code_creation(message)
+            return
+        elif current_state == 'creating_poll_question':  # Новое состояние
+            handle_poll_question(message)
+            return
+        elif current_state == 'creating_poll_options':  # Новое состояние
+            handle_poll_options(message)
             return
 
     # Обработка обычных команд
@@ -3485,11 +3635,12 @@ def handle_messages(message):
         "⚙️ Админ-панель": admin_broadcast_menu,
         "📊 Мои викторины": show_my_quizzes,
         "📢 Создать рассылку": lambda msg: start_broadcast_creation(msg),
+        "📊 Создать опрос": lambda msg: start_poll_creation(msg),  # Новая кнопка
         "📊 Статистика рассылок": handle_admin_broadcast_stats,
         "📋 История рассылок": handle_admin_broadcast_history,
         "🎪 Создать лотерею": lambda msg: start_lottery_creation(msg),
-        "🔤 Создать код викторины": lambda msg: start_quiz_code_creation(msg),  # НОВАЯ КНОПКА
-        "📊 Статистика викторин": lambda msg: show_quiz_stats(msg),  # НОВАЯ КНОПКА
+        "🔤 Создать код викторины": lambda msg: start_quiz_code_creation(msg),
+        "📊 Статистика викторин": lambda msg: show_quiz_stats(msg),
         "🗑️ Удалить активные лотереи": handle_admin_delete_active_lotteries,
         "🧹 Удалить завершенные лотереи": handle_admin_delete_finished_lotteries,
         "🎰 Запустить розыгрыш": handle_admin_draw_lottery,
@@ -4445,6 +4596,7 @@ if __name__ == '__main__':
     print("   • 💸 Кредитная система")
     print("   • 🛒 Магазин товаров")
     print("   • 🎯 Система викторин с кодовыми словами")
+    print("   • 📊 Система опросов в рассылках")  # Новая функция
     print("=" * 50)
 
     test_data = load_google_sheets_data()
@@ -4453,23 +4605,7 @@ if __name__ == '__main__':
     # Создаем тестовые коды викторин
     create_initial_quiz_codes()
 
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM lotteries WHERE status = "active"')
-        active_lotteries = cursor.fetchone()[0]
-        conn.close()
 
-        if active_lotteries == 0:
-            create_lottery(
-                "🎉 Приветственная лотерея",
-                "Участвуйте и выигрывайте баллы! Первая лотерея в нашем боте!",
-                10,
-                100
-            )
-            print("✅ Создана тестовая лотерея")
-    except Exception as e:
-        print(f"⚠️ Не удалось создать тестовую лотерею: {e}")
 
     print("🔄 Запускаем поллинг...")
     try:
@@ -4479,19 +4615,3 @@ if __name__ == '__main__':
         print("🔄 Перезапускаем бота...")
         time.sleep(5)
         bot.infinity_polling(timeout=60, long_polling_timeout=60)
-
-# ================== ЗАПУСК ДЛЯ AMVERA ==================
-if __name__ == '__main__':
-    print("=" * 50)
-    print("🚀 БОТ ЗАПУСКАЕТСЯ НА AMVERA (Python 3.14)")
-    print("=" * 50)
-
-    while True:
-        try:
-            print("🔄 Запускаем бота...")
-            bot.infinity_polling(timeout=60, long_polling_timeout=60)
-        except Exception as e:
-            print(f"❌ Ошибка: {e}")
-            print("🔄 Перезапуск через 10 секунд...")
-
-            time.sleep(10)
