@@ -2209,6 +2209,7 @@ def create_tracked_poll(admin_id, question, options, allows_multiple_answers=Fal
         conn.commit()
         conn.close()
 
+        print(f"✅ Создан опрос #{poll_id}: {question} (множественный выбор: {allows_multiple_answers})")
         return poll_id
     except Exception as e:
         print(f"❌ Ошибка создания опроса на кнопках: {e}")
@@ -2687,25 +2688,35 @@ def start_tracked_poll_creation(message):
 
     bot.send_message(user_id, instruction, reply_markup=markup)
 
-
 def handle_tracked_poll_creation(message):
     """Обрабатывает создание отслеживаемого опроса"""
     user_id = str(message.from_user.id)
 
+    print(f"🔍 Обработка опроса: состояние={user_states.get(user_id)}, текст='{message.text}'")
+
+    if message.text in ["🔙 Отмена", "🔙 Назад", "🔙 В меню"]:
+        user_states[user_id] = None
+        admin_broadcast_menu(message)
+        return
+
+    # Обработка выбора типа опроса
     if user_states.get(user_id) == 'creating_tracked_poll_type':
         question = user_states.get(f"{user_id}_tracked_poll_question")
         options = user_states.get(f"{user_id}_tracked_poll_options")
 
         if message.text == "✅ Один вариант":
             allows_multiple = False
-        else:
+        elif message.text == "✅✅ Несколько вариантов":
             allows_multiple = True
+        else:
+            bot.send_message(user_id, "❌ Пожалуйста, выберите тип опроса из кнопок")
+            return
 
         # Создаем отслеживаемый опрос
         poll_id = create_tracked_poll(user_id, question, options, allows_multiple)
 
         if poll_id:
-            poll_type = "с множественным выбором" if allows_multiple else "с одним вариантом"
+            poll_type = "с одним вариантом" if not allows_multiple else "с множественным выбором"
             success_msg = f"""✅ ОТСЛЕЖИВАЕМЫЙ ОПРОС СОЗДАН!
 
 📝 Вопрос: {question}
@@ -2738,6 +2749,7 @@ def handle_tracked_poll_creation(message):
         if f"{user_id}_tracked_poll_options" in user_states:
             del user_states[f"{user_id}_tracked_poll_options"]
 
+    # Обработка ввода вариантов ответов
     elif user_states.get(user_id) == 'creating_tracked_poll_options':
         question = user_states.get(f"{user_id}_tracked_poll_question")
         options = [opt.strip() for opt in message.text.split(',') if opt.strip()]
@@ -2759,6 +2771,27 @@ def handle_tracked_poll_creation(message):
             "🎯 Выберите тип опроса:\n\n"
             "• ✅ Один вариант - пользователь может выбрать только один ответ\n"
             "• ✅✅ Несколько вариантов - пользователь может выбрать несколько ответов",
+            reply_markup=markup
+        )
+
+    # Обработка ввода вопроса
+    elif user_states.get(user_id) == 'creating_tracked_poll_question':
+        question = message.text.strip()
+        if len(question) < 5:
+            bot.send_message(user_id, "❌ Вопрос должен содержать минимум 5 символов")
+            return
+
+        user_states[user_id] = 'creating_tracked_poll_options'
+        user_states[f"{user_id}_tracked_poll_question"] = question
+
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add(types.KeyboardButton("🔙 Отмена"))
+
+        bot.send_message(
+            user_id,
+            "📋 Теперь введите варианты ответов через запятую:\n\n"
+            "Пример: Вариант 1, Вариант 2, Вариант 3\n\n"
+            "Минимум 2 варианта ответа:",
             reply_markup=markup
         )
 
@@ -4332,13 +4365,9 @@ def handle_messages(message):
         elif current_state == 'creating_quiz_code':
             handle_quiz_code_creation(message)
             return
-        elif current_state == 'creating_tracked_poll_question':
-            user_states[user_id] = 'creating_tracked_poll_options'
-            user_states[f"{user_id}_tracked_poll_question"] = message.text
-            bot.send_message(user_id, "📋 Теперь введите варианты ответов через запятую:")
-            return
-        elif current_state == 'creating_tracked_poll_options':
-            handle_tracked_poll_creation(message)
+        elif current_state in ['creating_tracked_poll_question', 'creating_tracked_poll_options',
+                               'creating_tracked_poll_type']:
+            handle_tracked_poll_creation(message)  # ВСЕ состояния опросов обрабатываются здесь
             return
 
     # Обработка обычных команд
