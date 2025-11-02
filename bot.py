@@ -360,6 +360,19 @@ def init_balance_db():
             )
         ''')
 
+        # ТАБЛИЦА ДЛЯ ОТСЛЕЖИВАНИЯ ОТВЕТОВ НА ОПРОСЫ
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tracked_poll_responses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                poll_id INTEGER,
+                user_id TEXT,
+                user_name TEXT,
+                selected_options TEXT,
+                poll_message_id TEXT,
+                responded_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         conn.commit()
         conn.close()
         print("✅ Все таблицы базы данных инициализированы")
@@ -2016,6 +2029,358 @@ def handle_my_tickets(call):
             pass
 
 
+# ================== СИСТЕМА ОТСЛЕЖИВАЕМЫХ ОПРОСОВ ==================
+def create_tracked_poll(admin_id, question, options, allows_multiple_answers=False):
+    """Создает опрос с скрытым отслеживанием"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        poll_options_json = json.dumps(options, ensure_ascii=False)
+        
+        cursor.execute('''
+            INSERT INTO broadcasts (admin_id, message_text, message_type, 
+                                  poll_question, poll_options, allows_multiple_answers,
+                                  is_anonymous, status)
+            VALUES (?, ?, 'tracked_poll', ?, ?, ?, FALSE, 'scheduled')
+        ''', (str(admin_id), f"Опрос: {question}", question, poll_options_json, allows_multiple_answers))
+        
+        poll_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        
+        return poll_id
+        
+    except Exception as e:
+        print(f"❌ Ошибка создания отслеживаемого опроса: {e}")
+        return None
+
+def send_tracked_poll(broadcast_id):
+    """Отправляет опрос со скрытым отслеживанием"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT poll_question, poll_options, allows_multiple_answers 
+            FROM broadcasts WHERE id = ?
+        ''', (broadcast_id,))
+
+        broadcast = cursor.fetchone()
+        if not broadcast:
+            return False, "Рассылка не найдена"
+
+        question, options_json, allows_multiple_answers = broadcast
+        options = json.loads(options_json) if options_json else None
+
+        cursor.execute('SELECT user_id FROM users')
+        users = cursor.fetchall()
+
+        sent_count = 0
+        failed_count = 0
+
+        for user_tuple in users:
+            user_id = user_tuple[0]
+            try:
+                # Отправляем "анонимный" опрос (пользователь думает что анонимный)
+                sent_poll = bot.send_poll(
+                    chat_id=user_id,
+                    question=question,
+                    options=options,
+                    is_anonymous=False,  # НЕ анонимный! Но пользователь не видит разницы
+                    allows_multiple_answers=allows_multiple_answers,
+                    type='regular'
+                )
+                
+                # Сохраняем связь пользователь-опрос для отслеживания
+                cursor.execute('''
+                    INSERT INTO tracked_poll_responses (poll_id, user_id, user_name, poll_message_id)
+                    VALUES (?, ?, ?, ?)
+                ''', (broadcast_id, user_id, "Ожидание ответа", str(sent_poll.message_id)))
+                
+                sent_count += 1
+                time.sleep(0.1)
+
+            except Exception as e:
+                print(f"❌ Ошибка отправки пользователю {user_id}: {e}")
+                failed_count += 1
+
+        cursor.execute('''
+            UPDATE broadcasts 
+            SET sent_count = ?, failed_count = ?, status = 'sent', sent_at = ?
+            WHERE id = ?
+        ''', (sent_count, failed_count, datetime.now().isoformat(), broadcast_id))
+
+        conn.commit()
+        conn.close()
+
+        return True, f"✅ Отправлено: {sent_count}, Не удалось: {failed_count}"
+
+    except Exception as e:
+        print(f"❌ Ошибка отправки отслеживаемого опроса: {e}")
+        return False, f"Ошибка: {e}"
+
+@bot.poll_answer_handler()
+def handle_poll_answer(poll_answer):
+    """Перехватывает ответы на опросы и сохраняет кто что ответил"""
+    try:
+        user_id = str(poll_answer.user.id)
+        poll_id = str(poll_answer.poll_id)
+        option_ids = poll_answer.option_ids
+        
+        print(f"🔍 Получен ответ на опрос: user={user_id}, poll={poll_id}, options={option_ids}")
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Находим какой опрос и какие варианты
+        cursor.execute('''
+            SELECT br.id, br.poll_question, br.poll_options 
+            FROM tracked_poll_responses tpr
+            JOIN broadcasts br ON tpr.poll_id = br.id
+            WHERE tpr.poll_message_id = ? AND tpr.user_id = ?
+        ''', (poll_id, user_id))
+        
+        poll_data = cursor.fetchone()
+        
+        if poll_data:
+            broadcast_id, question, options_json = poll_data
+            options = json.loads(options_json) if options_json else []
+            
+            # Получаем тексты выбранных вариантов
+            selected_options = []
+            for option_id in option_ids:
+                if option_id < len(options):
+                    selected_options.append(options[option_id])
+            
+            selected_text = ", ".join(selected_options) if selected_options else "Не выбрано"
+            
+            # Обновляем запись с ответом пользователя
+            cursor.execute('''
+                UPDATE tracked_poll_responses 
+                SET selected_options = ?, user_name = ?, responded_at = ?
+                WHERE poll_message_id = ? AND user_id = ?
+            ''', (
+                selected_text, 
+                f"{poll_answer.user.first_name or ''} {poll_answer.user.last_name or ''}".strip() or "Аноним",
+                datetime.now().isoformat(),
+                poll_id,
+                user_id
+            ))
+            
+            conn.commit()
+            print(f"✅ Ответ сохранен: {user_id} -> {selected_text}")
+        
+        conn.close()
+        
+    except Exception as e:
+        print(f"❌ Ошибка обработки ответа на опрос: {e}")
+
+def get_tracked_poll_statistics(poll_id):
+    """Получает детальную статистику по отслеживаемому опросу"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Информация об опросе
+        cursor.execute('SELECT poll_question, poll_options, sent_count FROM broadcasts WHERE id = ?', (poll_id,))
+        poll_info = cursor.fetchone()
+        
+        if not poll_info:
+            return None
+            
+        question, options_json, sent_count = poll_info
+        options = json.loads(options_json) if options_json else []
+        
+        # Ответы пользователей
+        cursor.execute('''
+            SELECT user_id, user_name, selected_options, responded_at 
+            FROM tracked_poll_responses 
+            WHERE poll_id = ? AND selected_options IS NOT NULL
+            ORDER BY responded_at
+        ''', (poll_id,))
+        
+        responses = cursor.fetchall()
+        
+        # Общая статистика
+        cursor.execute('SELECT COUNT(*) FROM tracked_poll_responses WHERE poll_id = ? AND selected_options IS NOT NULL', (poll_id,))
+        total_responses = cursor.fetchone()[0]
+        
+        # Статистика по вариантам
+        option_counts = {option: 0 for option in options}
+        user_responses = []
+        
+        for response in responses:
+            user_id, user_name, selected_options, responded_at = response
+            user_responses.append((user_id, user_name, selected_options, responded_at))
+            
+            # Считаем варианты (для множественного выбора)
+            selected_list = [opt.strip() for opt in selected_options.split(',')]
+            for selected in selected_list:
+                if selected in option_counts:
+                    option_counts[selected] += 1
+        
+        conn.close()
+        
+        return {
+            'question': question,
+            'options': options,
+            'sent_count': sent_count,
+            'total_responses': total_responses,
+            'option_counts': option_counts,
+            'user_responses': user_responses
+        }
+        
+    except Exception as e:
+        print(f"❌ Ошибка получения статистики опроса: {e}")
+        return None
+
+def show_detailed_tracked_statistics(message, poll_id):
+    """Показывает детальную статистику с ответами пользователей"""
+    user_id = str(message.from_user.id)
+    
+    stats = get_tracked_poll_statistics(poll_id)
+    if not stats:
+        bot.send_message(user_id, "❌ Статистика для этого опроса не найдена")
+        return
+    
+    report = f"📊 ДЕТАЛЬНАЯ СТАТИСТИКА ОПРОСА\n\n"
+    report += f"📝 Вопрос: {stats['question']}\n"
+    report += f"👥 Получили опрос: {stats['sent_count']} пользователей\n"
+    report += f"✅ Ответили: {stats['total_responses']} пользователей\n"
+    report += f"📊 Охват: {(stats['total_responses']/stats['sent_count']*100) if stats['sent_count'] > 0 else 0:.1f}%\n\n"
+    
+    report += "📈 РАСПРЕДЕЛЕНИЕ ОТВЕТОВ:\n"
+    for option in stats['options']:
+        count = stats['option_counts'].get(option, 0)
+        percentage = (count / stats['total_responses'] * 100) if stats['total_responses'] > 0 else 0
+        report += f"• {option}: {count} ({percentage:.1f}%)\n"
+    
+    report += f"\n👤 ОТВЕТЫ ПОЛЬЗОВАТЕЛЕЙ ({len(stats['user_responses'])}):\n"
+    
+    for i, (user_id, user_name, selected_options, responded_at) in enumerate(stats['user_responses'], 1):
+        date_str = datetime.fromisoformat(responded_at).strftime('%d.%m %H:%M')
+        report += f"{i}. {user_name} (ID: {user_id}): {selected_options} - {date_str}\n"
+        
+        # Разбиваем отчет если слишком длинный
+        if i % 20 == 0 and i < len(stats['user_responses']):
+            bot.send_message(user_id, report)
+            report = "👤 ОТВЕТЫ ПОЛЬЗОВАТЕЛЕЙ (продолжение):\n"
+    
+    if report:
+        bot.send_message(user_id, report)
+
+def show_tracked_polls_list(message):
+    """Показывает список отслеживаемых опросов"""
+    user_id = str(message.from_user.id)
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, poll_question, created_at, sent_count 
+            FROM broadcasts 
+            WHERE message_type = 'tracked_poll' AND status = 'sent'
+            ORDER BY created_at DESC
+            LIMIT 10
+        ''')
+        
+        polls = cursor.fetchall()
+        conn.close()
+        
+        if not polls:
+            bot.send_message(user_id, "📊 Нет отслеживаемых опросов")
+            return
+        
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        
+        polls_text = "📊 ОТСЛЕЖИВАЕМЫЕ ОПРОСЫ:\n\n"
+        for poll_id, question, created_at, sent_count in polls:
+            date_str = datetime.fromisoformat(created_at).strftime('%d.%m.%Y')
+            polls_text += f"📝 {question}\n"
+            polls_text += f"   🆔 ID: {poll_id} | 📅 {date_str} | 👥 {sent_count} пользователей\n"
+            polls_text += f"   [Показать статистику] -> /stats_{poll_id}\n\n"
+            
+            # Добавляем кнопку для быстрого доступа
+            markup.add(types.KeyboardButton(f"📊 Статистика опроса {poll_id}"))
+        
+        markup.add(types.KeyboardButton("🔙 В админ-меню"))
+        
+        bot.send_message(user_id, polls_text, reply_markup=markup)
+        
+    except Exception as e:
+        print(f"❌ Ошибка показа списка опросов: {e}")
+        bot.send_message(user_id, "❌ Ошибка загрузки списка опросов")
+
+# Команда для быстрого просмотра статистики
+@bot.message_handler(func=lambda message: message.text.startswith('/stats_'))
+def quick_stats_command(message):
+    """Быстрый просмотр статистики по ID опроса"""
+    try:
+        poll_id = int(message.text.replace('/stats_', ''))
+        show_detailed_tracked_statistics(message, poll_id)
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Неверный ID опроса")
+
+def start_tracked_poll_creation(message):
+    """Начинает процесс создания отслеживаемого опроса"""
+    user_id = str(message.from_user.id)
+    user_states[user_id] = 'creating_tracked_poll_question'
+
+    instruction = """🎯 СОЗДАНИЕ ОТСЛЕЖИВАЕМОГО ОПРОСА
+
+Пользователи будут видеть опрос как обычный анонимный, но вы сможете видеть кто что ответил.
+
+Введите вопрос для опроса:
+
+Для отмены нажмите кнопку '🔙 Отмена'"""
+
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("🔙 Отмена"))
+
+    bot.send_message(user_id, instruction, reply_markup=markup)
+
+def handle_tracked_poll_creation(message):
+    """Обрабатывает создание отслеживаемого опроса"""
+    user_id = str(message.from_user.id)
+    
+    if user_states.get(user_id) == 'creating_tracked_poll_question':
+        user_states[user_id] = 'creating_tracked_poll_options'
+        user_states[f"{user_id}_tracked_poll_question"] = message.text
+        
+        bot.send_message(user_id, "📋 Теперь введите варианты ответов через запятую:")
+        
+    elif user_states.get(user_id) == 'creating_tracked_poll_options':
+        question = user_states.get(f"{user_id}_tracked_poll_question")
+        options = [opt.strip() for opt in message.text.split(',') if opt.strip()]
+        
+        if len(options) < 2:
+            bot.send_message(user_id, "❌ Нужно как минимум 2 варианта ответа")
+            return
+        
+        # Создаем отслеживаемый опрос
+        poll_id = create_tracked_poll(user_id, question, options)
+        
+        if poll_id:
+            bot.send_message(user_id, f"✅ Отслеживаемый опрос создан! ID: {poll_id}\n\nОтправляем пользователям...")
+            
+            # Отправляем опрос
+            success, result = send_tracked_poll(poll_id)
+            
+            if success:
+                bot.send_message(user_id, f"✅ Опрос отправлен!\n{result}")
+            else:
+                bot.send_message(user_id, f"❌ Ошибка отправки:\n{result}")
+        else:
+            bot.send_message(user_id, "❌ Ошибка создания опроса")
+        
+        # Очищаем состояния
+        user_states[user_id] = None
+        if f"{user_id}_tracked_poll_question" in user_states:
+            del user_states[f"{user_id}_tracked_poll_question"]
+
+
 # ================== СИСТЕМА РАССЫЛОК И УВЕДОМЛЕНИЙ ==================
 def create_broadcast(admin_id, message_text, message_type='text', file_id=None,
                      poll_question=None, poll_options=None, is_anonymous=True,
@@ -2190,9 +2555,9 @@ def admin_broadcast_menu(message):
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("📢 Создать рассылку"))
-    markup.add(types.KeyboardButton("📊 Создать опрос"))  # Новая кнопка
-    markup.add(types.KeyboardButton("📊 Статистика рассылок"))
-    markup.add(types.KeyboardButton("📋 История рассылок"))
+    markup.add(types.KeyboardButton("🎯 Создать отслеживаемый опрос"))  # Новая кнопка
+    markup.add(types.KeyboardButton("📊 Статистика опросов"))
+    markup.add(types.KeyboardButton("📋 Список опросов"))  # Новая кнопка
     markup.add(types.KeyboardButton("🎪 Создать лотерею"))
     markup.add(types.KeyboardButton("🗑️ Удалить активные лотереи"))
     markup.add(types.KeyboardButton("🧹 Удалить завершенные лотереи"))
@@ -2225,105 +2590,6 @@ def start_broadcast_creation(message):
         reply_markup=markup,
         parse_mode='Markdown'
     )
-
-
-def start_poll_creation(message):
-    """Начинает процесс создания опроса"""
-    user_id = str(message.from_user.id)
-    user_states[user_id] = 'creating_poll_question'
-
-    instruction = """📊 СОЗДАНИЕ ОПРОСА
-
-Введите вопрос для опроса:
-
-Для отмены нажмите кнопку '🔙 Отмена'"""
-
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("🔙 Отмена"))
-
-    bot.send_message(user_id, instruction, reply_markup=markup)
-
-
-def handle_poll_question(message):
-    """Обрабатывает вопрос опроса"""
-    user_id = str(message.from_user.id)
-
-    if message.text in ["🔙 Отмена", "🔙 Назад", "🔙 В меню"]:
-        user_states[user_id] = None
-        admin_broadcast_menu(message)
-        return
-
-    user_states[user_id] = 'creating_poll_options'
-    user_states[f"{user_id}_poll_question"] = message.text
-
-    instruction = """📋 ВВЕДИТЕ ВАРИАНТЫ ОТВЕТОВ
-
-Введите варианты ответов через запятую:
-
-Пример: 
-Да, Нет, Не знаю
-Вариант 1, Вариант 2, Вариант 3, Вариант 4
-
-Максимум 10 вариантов.
-
-Для отмены нажмите '🔙 Отмена'"""
-
-    bot.send_message(user_id, instruction)
-
-
-def handle_poll_options(message):
-    """Обрабатывает варианты ответов опроса"""
-    user_id = str(message.from_user.id)
-
-    if message.text in ["🔙 Отмена", "🔙 Назад", "🔙 В меню"]:
-        user_states[user_id] = None
-        if f"{user_id}_poll_question" in user_states:
-            del user_states[f"{user_id}_poll_question"]
-        admin_broadcast_menu(message)
-        return
-
-    try:
-        question = user_states.get(f"{user_id}_poll_question")
-        options = [opt.strip() for opt in message.text.split(',') if opt.strip()]
-
-        if len(options) < 2:
-            bot.send_message(user_id, "❌ Нужно как минимум 2 варианта ответа")
-            return
-
-        if len(options) > 10:
-            bot.send_message(user_id, "❌ Максимум 10 вариантов ответа")
-            options = options[:10]
-
-        # Создаем рассылку с опросом
-        broadcast_id = create_broadcast(
-            admin_id=user_id,
-            message_text=f"Опрос: {question}",
-            message_type='poll',
-            poll_question=question,
-            poll_options=options,
-            is_anonymous=True,
-            allows_multiple_answers=False
-        )
-
-        if broadcast_id:
-            success, result = send_broadcast(broadcast_id)
-
-            if success:
-                bot.send_message(user_id, f"✅ Опрос создан и отправлен!\n\n{result}")
-            else:
-                bot.send_message(user_id, f"❌ Опрос создан, но возникли ошибки:\n{result}")
-        else:
-            bot.send_message(user_id, "❌ Ошибка создания опроса")
-
-    except Exception as e:
-        bot.send_message(user_id, f"❌ Ошибка: {e}")
-
-    # Очищаем состояния
-    user_states[user_id] = None
-    if f"{user_id}_poll_question" in user_states:
-        del user_states[f"{user_id}_poll_question"]
-
-    admin_broadcast_menu(message)
 
 
 def handle_admin_broadcast_creation(message):
@@ -3610,11 +3876,13 @@ def handle_messages(message):
         elif current_state == 'creating_quiz_code':
             handle_quiz_code_creation(message)
             return
-        elif current_state == 'creating_poll_question':  # Новое состояние
-            handle_poll_question(message)
+        elif current_state == 'creating_tracked_poll_question':
+            user_states[user_id] = 'creating_tracked_poll_options'
+            user_states[f"{user_id}_tracked_poll_question"] = message.text
+            bot.send_message(user_id, "📋 Теперь введите варианты ответов через запятую:")
             return
-        elif current_state == 'creating_poll_options':  # Новое состояние
-            handle_poll_options(message)
+        elif current_state == 'creating_tracked_poll_options':
+            handle_tracked_poll_creation(message)
             return
 
     # Обработка обычных команд
@@ -3635,7 +3903,9 @@ def handle_messages(message):
         "⚙️ Админ-панель": admin_broadcast_menu,
         "📊 Мои викторины": show_my_quizzes,
         "📢 Создать рассылку": lambda msg: start_broadcast_creation(msg),
-        "📊 Создать опрос": lambda msg: start_poll_creation(msg),  # Новая кнопка
+        "🎯 Создать отслеживаемый опрос": lambda msg: start_tracked_poll_creation(msg),
+        "📊 Статистика опросов": lambda msg: show_tracked_polls_list(msg),
+        "📋 Список опросов": lambda msg: show_tracked_polls_list(msg),
         "📊 Статистика рассылок": handle_admin_broadcast_stats,
         "📋 История рассылок": handle_admin_broadcast_history,
         "🎪 Создать лотерею": lambda msg: start_lottery_creation(msg),
@@ -3653,6 +3923,12 @@ def handle_messages(message):
         show_credit_menu(message)
     elif message.text.startswith("🎰 ") and " (билетов: " in message.text:
         handle_lottery_selection_for_draw(message)
+    elif message.text.startswith("📊 Статистика опроса "):
+        try:
+            poll_id = int(message.text.replace("📊 Статистика опроса ", ""))
+            show_detailed_tracked_statistics(message, poll_id)
+        except ValueError:
+            bot.send_message(user_id, "❌ Неверный ID опроса")
     else:
         # Обработка кодовых слов викторин
         handle_quiz_code(message)
@@ -4360,6 +4636,10 @@ def show_stats(message):
         cursor.execute('SELECT SUM(sent_count) FROM broadcasts WHERE status = "sent"')
         total_messages_sent = cursor.fetchone()[0] or 0
 
+        # Статистика отслеживаемых опросов
+        cursor.execute('SELECT COUNT(*) FROM tracked_poll_responses WHERE selected_options IS NOT NULL')
+        total_poll_responses = cursor.fetchone()[0]
+
         conn.close()
 
         stats_text = f"""📊 СТАТИСТИКА БОТА
@@ -4379,6 +4659,7 @@ def show_stats(message):
 💫 Опыта за викторины: {total_quiz_xp}
 📢 Рассылок отправлено: {total_broadcasts}
 📨 Сообщений рассылки: {total_messages_sent}
+📊 Ответов на опросы: {total_poll_responses}
 ⏰ Время работы: {datetime.now().strftime('%d.%m.%Y %H:%M')}"""
 
         bot.send_message(message.chat.id, stats_text)
@@ -4596,7 +4877,7 @@ if __name__ == '__main__':
     print("   • 💸 Кредитная система")
     print("   • 🛒 Магазин товаров")
     print("   • 🎯 Система викторин с кодовыми словами")
-    print("   • 📊 Система опросов в рассылках")  # Новая функция
+    print("   • 🎯 Система отслеживаемых опросов")
     print("=" * 50)
 
     test_data = load_google_sheets_data()
@@ -4604,8 +4885,6 @@ if __name__ == '__main__':
 
     # Создаем тестовые коды викторин
     create_initial_quiz_codes()
-
-
 
     print("🔄 Запускаем поллинг...")
     try:
