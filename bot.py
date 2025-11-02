@@ -939,11 +939,13 @@ def handle_balance_fix(message):
         bot.send_message(user_id, "🔄 Исправляем все балансы...")
         fixed_count = fix_all_balances()
         bot.send_message(user_id, f"✅ Исправлено балансов: {fixed_count}")
-        admin_broadcast_menu(message)
+        # ОСТАЕМСЯ В МЕНЮ ИСПРАВЛЕНИЯ
+        show_balance_fix_menu(message)
 
     elif message.text == "📊 Проверить мои транзакции":
         show_transaction_debug(message)
-        admin_broadcast_menu(message)
+        # ОСТАЕМСЯ В МЕНЮ ИСПРАВЛЕНИЯ
+        show_balance_fix_menu(message)
     else:
         admin_broadcast_menu(message)
 
@@ -1633,21 +1635,15 @@ def get_user_quiz_history(user_id):
 def handle_quiz_code(message):
     """Обработчик кодовых слов из викторин"""
     user_id = str(message.from_user.id)
-    code = message.text.strip().upper()
 
-    # Игнорируем команды, кнопки и сообщения когда пользователь в других состояниях
-    if (len(code) < 3 or
-        code in ["🔙 НАЗАД", "🔙 ОТМЕНА", "НАЗАД", "ОТМЕНА", "ADMIN123", "🔧 ИСПРАВИТЬ ВСЕ БАЛАНСЫ", "📊 ПРОВЕРИТЬ МОИ ТРАНЗАКЦИИ"] or
-        user_states.get(user_id) in ['waiting_password', 'creating_broadcast',
-                                   'creating_lottery', 'waiting_credit_amount',
-                                   'waiting_suggestion', 'shopping'] or
-        message.text in ["🔧 Исправить все балансы", "📊 Проверить мои транзакции"]):
+    # ВОТ ГЛАВНОЕ ИСПРАВЛЕНИЕ - если пользователь в ЛЮБОМ состоянии, игнорируем
+    if user_id in user_states and user_states[user_id] is not None:
         return
 
-    # Дополнительная проверка: если сообщение похоже на пароль или команду, игнорируем
-    if (message.text.isdigit() or  # Числовые сообщения (возможно пароль)
-        len(message.text) > 50 or  # Длинные сообщения (не коды)
-        ' ' in message.text):      # Сообщения с пробелами
+    code = message.text.strip().upper()
+
+    # Только коды длиной 4+ символа без пробелов
+    if len(code) < 4 or ' ' in code:
         return
 
     # Показываем индикатор обработки
@@ -4185,45 +4181,44 @@ def handle_messages(message):
             start(message)
         return
 
-        # Проверяем состояния пользователя
-        if user_id in user_states:
-            current_state = user_states[user_id]
+    # Проверяем состояния пользователя
+    if user_id in user_states and user_states[user_id] is not None:
+        current_state = user_states[user_id]
 
-            # Обработка конкретных состояний
-            if current_state == 'waiting_suggestion':
-                handle_suggestion(message)
-                return
-            elif current_state == 'waiting_password':
-                handle_password(message)
-                return
-            elif current_state == 'waiting_credit_amount':
-                handle_credit_amount(message)
-                return
-            elif current_state == 'shopping':
-                handle_shop_selection(message)
-                return
-            elif current_state == 'creating_lottery':
-                handle_admin_lottery_creation(message)
-                return
-            elif current_state == 'creating_broadcast':
-                handle_admin_broadcast_creation(message)
-                return
-            elif current_state == 'selecting_lottery_to_draw':
-                handle_lottery_selection_for_draw(message)
-                return
-            elif current_state == 'creating_quiz_code':
-                handle_quiz_code_creation(message)
-                return
-            elif current_state == 'creating_tracked_poll_question':
-                user_states[user_id] = 'creating_tracked_poll_options'
-                user_states[f"{user_id}_tracked_poll_question"] = message.text
-                bot.send_message(user_id, "📋 Теперь введите варианты ответов через запятую:")
-                return
-            elif current_state == 'creating_tracked_poll_options':
-                handle_tracked_poll_creation(message)
-                return
+        if current_state == 'waiting_suggestion':
+            handle_suggestion(message)
+            return
+        elif current_state == 'waiting_password':
+            handle_password(message)
+            return
+        elif current_state == 'waiting_credit_amount':
+            handle_credit_amount(message)
+            return
+        elif current_state == 'shopping':
+            handle_shop_selection(message)
+            return
+        elif current_state == 'creating_lottery':
+            handle_admin_lottery_creation(message)
+            return
+        elif current_state == 'creating_broadcast':
+            handle_admin_broadcast_creation(message)
+            return
+        elif current_state == 'selecting_lottery_to_draw':
+            handle_lottery_selection_for_draw(message)
+            return
+        elif current_state == 'creating_quiz_code':
+            handle_quiz_code_creation(message)
+            return
+        elif current_state == 'creating_tracked_poll_question':
+            user_states[user_id] = 'creating_tracked_poll_options'
+            user_states[f"{user_id}_tracked_poll_question"] = message.text
+            bot.send_message(user_id, "📋 Теперь введите варианты ответов через запятую:")
+            return
+        elif current_state == 'creating_tracked_poll_options':
+            handle_tracked_poll_creation(message)
+            return
 
-        # Обработка обычных команд
+    # Обработка обычных команд
     handlers = {
         "👤 Профиль": show_profile,
         "📊 История зачислений": show_history,
@@ -4247,8 +4242,7 @@ def handle_messages(message):
         "📋 Список опросов": lambda msg: show_tracked_polls_list(msg),
         "📊 Статистика рассылок": handle_admin_broadcast_stats,
         "📋 История рассылок": handle_admin_broadcast_history,
-        "🔧 Исправить балансы": lambda msg: handle_balance_fix(msg),
-        "📊 Проверить мои транзакции": lambda msg: show_transaction_debug(msg),
+        "🔧 Исправить балансы": lambda msg: show_balance_fix_menu(msg),  # ТОЧНО ЕСТЬ
         "🎪 Создать лотерею": lambda msg: start_lottery_creation(msg),
         "🔤 Создать код викторины": lambda msg: start_quiz_code_creation(msg),
         "📊 Статистика викторин": lambda msg: show_quiz_stats(msg),
@@ -4256,6 +4250,7 @@ def handle_messages(message):
         "🧹 Удалить завершенные лотереи": handle_admin_delete_finished_lotteries,
         "🎰 Запустить розыгрыш": handle_admin_draw_lottery,
         "🔄 Обновить кэш Google": handle_admin_refresh_cache,
+        "📊 Проверить мои транзакции": lambda msg: show_transaction_debug(msg),  # ТОЧНО ЕСТЬ
     }
 
     if message.text in handlers:
@@ -4271,7 +4266,7 @@ def handle_messages(message):
         except ValueError:
             bot.send_message(user_id, "❌ Неверный ID опроса")
     else:
-        # Обработка кодовых слов викторин
+        # Обработка кодовых слов викторин - ТОЛЬКО если пользователь не в состоянии
         handle_quiz_code(message)
 
 
