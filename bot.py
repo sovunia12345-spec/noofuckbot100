@@ -386,15 +386,15 @@ def upgrade_database():
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Обновление таблицы users
+        # Проверяем наличие столбца google_balance
         cursor.execute("PRAGMA table_info(users)")
         columns = [column[1] for column in cursor.fetchall()]
 
-        if 'google_balance' not in columns:
-            print("🔄 Добавляем поле google_balance...")
-            cursor.execute('ALTER TABLE users ADD COLUMN google_balance INTEGER DEFAULT 0')
-            cursor.execute('UPDATE users SET google_balance = balance WHERE google_balance IS NULL')
-            print("✅ Поле google_balance добавлено")
+        # Если есть google_balance - удаляем его (опционально, можно оставить для совместимости)
+        if 'google_balance' in columns:
+            print("🔄 Обнаружено поле google_balance...")
+            # Вместо удаления просто не используем его в новой логике
+            print("✅ Поле google_balance будет игнорироваться в новой логике")
 
         # Обновление таблицы broadcasts для опросов
         cursor.execute("PRAGMA table_info(broadcasts)")
@@ -649,11 +649,12 @@ def calculate_balance_from_google(user_id):
 
 
 def sync_user_balance(user_id):
-    """Синхронизирует баланс пользователя с Google таблицей"""
+    """Синхронизирует баланс пользователя с Google таблицей и объединяет в основной баланс"""
     try:
         users_data = load_google_sheets_data()
         user_id_str = str(user_id)
 
+        # Получаем баланс из Google таблицы
         if user_id_str in users_data:
             google_balance = users_data[user_id_str]['total_score']
         else:
@@ -662,46 +663,41 @@ def sync_user_balance(user_id):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        cursor.execute('SELECT balance, google_balance FROM users WHERE user_id = ?', (str(user_id),))
+        # Получаем текущее состояние пользователя
+        cursor.execute('SELECT balance FROM users WHERE user_id = ?', (str(user_id),))
         result = cursor.fetchone()
 
         if result:
-            current_balance, current_google_balance = result
+            current_balance = result[0]
 
-            if current_google_balance != google_balance:
-                balance_diff = google_balance - current_google_balance
+            # Суммируем все локальные транзакции (кроме initial)
+            cursor.execute('''
+                SELECT COALESCE(SUM(amount), 0) FROM transactions 
+                WHERE user_id = ? AND type != 'initial'
+            ''', (str(user_id),))
 
-                if balance_diff != 0:
-                    cursor.execute(
-                        'INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, ?, ?)',
-                        (str(user_id), balance_diff, 'google_sync', 'Корректировка по Google таблице')
-                    )
+            local_transactions = cursor.fetchone()[0]
 
-                    cursor.execute('''
-                        SELECT COALESCE(SUM(amount), 0) FROM transactions 
-                        WHERE user_id = ? AND type != 'initial'
-                    ''', (str(user_id),))
+            # Основной баланс = Google баланс + локальные транзакции
+            new_balance = google_balance + local_transactions
 
-                    total_transactions = cursor.fetchone()[0]
-                    new_balance = google_balance + total_transactions
+            # Если баланс изменился, обновляем
+            if current_balance != new_balance:
+                print(
+                    f"🔄 Обновляем баланс {user_id}: {current_balance} -> {new_balance} (Google: {google_balance} + Локальные: {local_transactions})")
 
-                    cursor.execute(
-                        'UPDATE users SET balance = ?, google_balance = ?, google_sync_date = ? WHERE user_id = ?',
-                        (new_balance, google_balance, datetime.now().isoformat(), str(user_id))
-                    )
+                cursor.execute(
+                    'UPDATE users SET balance = ?, updated_at = ? WHERE user_id = ?',
+                    (new_balance, datetime.now().isoformat(), str(user_id))
+                )
+            else:
+                print(f"✅ Баланс пользователя {user_id} актуален: {current_balance}")
 
-                    print(
-                        f"✅ Баланс синхронизирован: {user_id} Google: {google_balance} -> Локальные: {total_transactions} = Итого: {new_balance}")
-                else:
-                    cursor.execute(
-                        'UPDATE users SET google_sync_date = ? WHERE user_id = ?',
-                        (datetime.now().isoformat(), str(user_id))
-                    )
-                    print(f"✅ Баланс пользователя {user_id} уже актуален")
         else:
+            # Создаем нового пользователя
             cursor.execute(
-                'INSERT INTO users (user_id, balance, credit_balance, google_balance, google_sync_date) VALUES (?, ?, ?, ?, ?)',
-                (str(user_id), google_balance, 0, google_balance, datetime.now().isoformat())
+                'INSERT INTO users (user_id, balance, credit_balance, updated_at) VALUES (?, ?, ?, ?)',
+                (str(user_id), google_balance, 0, datetime.now().isoformat())
             )
 
             cursor.execute(
@@ -723,13 +719,15 @@ def sync_user_balance(user_id):
 
 # ================== ФУНКЦИИ БАЗЫ ДАННЫХ ==================
 def get_user_balance(user_id):
-    """Получает основной баланс пользователя"""
+    """Получает основной баланс пользователя (Google + локальные транзакции)"""
     try:
+        # Сначала синхронизируем с Google таблицей
         sync_user_balance(user_id)
 
         conn = get_db_connection()
         cursor = conn.cursor()
 
+        # Получаем баланс из БД
         cursor.execute('SELECT balance FROM users WHERE user_id = ?', (str(user_id),))
         result = cursor.fetchone()
 
@@ -776,7 +774,7 @@ def create_user_in_db(user_id):
         cursor = conn.cursor()
 
         cursor.execute(
-            'INSERT INTO users (user_id, balance, credit_balance, google_sync_date) VALUES (?, ?, ?, ?)',
+            'INSERT INTO users (user_id, balance, credit_balance, updated_at) VALUES (?, ?, ?, ?)',
             (str(user_id), initial_balance, 0, datetime.now().isoformat())
         )
 
@@ -812,6 +810,7 @@ def update_user_balance(user_id, amount, description, product_id=None):
         conn = get_db_connection()
         cursor = conn.cursor()
 
+        # Получаем текущий баланс
         cursor.execute('SELECT balance FROM users WHERE user_id = ?', (str(user_id),))
         result = cursor.fetchone()
 
@@ -830,12 +829,15 @@ def update_user_balance(user_id, amount, description, product_id=None):
             conn.close()
             return False
 
+        # Обновляем баланс
         cursor.execute(
             'UPDATE users SET balance = ?, updated_at = ? WHERE user_id = ?',
             (new_balance, datetime.now().isoformat(), str(user_id))
         )
 
-        transaction_type = 'purchase' if amount < 0 else 'credit' if amount > 0 else 'other'
+        # Создаем транзакцию
+        transaction_type = 'purchase' if amount < 0 else 'bonus' if 'бонус' in description.lower() else 'correction'
+
         cursor.execute(
             'INSERT INTO transactions (user_id, amount, type, description, product_id) VALUES (?, ?, ?, ?, ?)',
             (str(user_id), amount, transaction_type, description, product_id)
@@ -851,6 +853,156 @@ def update_user_balance(user_id, amount, description, product_id=None):
         print(f"❌ Ошибка обновления баланса: {e}")
         return False
 
+
+def fix_all_balances():
+    """Исправляет все балансы пользователей по новой логике"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Получаем всех пользователей
+        cursor.execute('SELECT user_id FROM users')
+        users = cursor.fetchall()
+
+        fixed_count = 0
+
+        for user_tuple in users:
+            user_id = user_tuple[0]
+
+            # Получаем баланс из Google таблицы
+            google_balance = calculate_balance_from_google(user_id)
+
+            # Суммируем все локальные транзакции (кроме initial)
+            cursor.execute('''
+                SELECT COALESCE(SUM(amount), 0) FROM transactions 
+                WHERE user_id = ? AND type != 'initial'
+            ''', (user_id,))
+
+            local_transactions = cursor.fetchone()[0]
+            correct_balance = google_balance + local_transactions
+
+            # Получаем текущий баланс для сравнения
+            cursor.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
+            current_balance_result = cursor.fetchone()
+
+            if current_balance_result and current_balance_result[0] != correct_balance:
+                print(
+                    f"🔄 Исправляем баланс {user_id}: {current_balance_result[0]} -> {correct_balance} (Google: {google_balance} + Локальные: {local_transactions})")
+
+                # Обновляем баланс
+                cursor.execute(
+                    'UPDATE users SET balance = ? WHERE user_id = ?',
+                    (correct_balance, user_id)
+                )
+                fixed_count += 1
+
+        conn.commit()
+        conn.close()
+
+        print(f"✅ Исправлено балансов: {fixed_count}")
+        return fixed_count
+
+    except Exception as e:
+        print(f"❌ Ошибка исправления балансов: {e}")
+        return 0
+
+def show_balance_fix_menu(message):
+        """Меню для исправления проблем с балансами"""
+        user_id = str(message.from_user.id)
+
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add(types.KeyboardButton("🔧 Исправить все балансы"))
+        markup.add(types.KeyboardButton("📊 Проверить мои транзакции"))
+        markup.add(types.KeyboardButton("🔙 В админ-меню"))
+
+        help_text = """🔧 ИСПРАВЛЕНИЕ БАЛАНСОВ
+
+    После перезапуска бота могли возникнуть проблемы с балансами из-за синхронизации с Google таблицей.
+
+    Проблема: Локальные транзакции (покупки, бонусы) терялись при синхронизации.
+
+    Решение: 
+    • Нажмите "🔧 Исправить все балансы" для автоматического исправления
+    • Система пересчитает балансы с учетом всех транзакций
+
+    Новая логика:
+    Баланс = (Баланс из Google таблицы) + (Все локальные транзакции)"""
+
+        bot.send_message(user_id, help_text, reply_markup=markup)
+
+
+def handle_balance_fix(message):
+    """Обработчик исправления балансов"""
+    user_id = str(message.from_user.id)
+
+    if message.text == "🔧 Исправить все балансы":
+        bot.send_message(user_id, "🔄 Исправляем все балансы...")
+        fixed_count = fix_all_balances()
+        bot.send_message(user_id, f"✅ Исправлено балансов: {fixed_count}")
+
+    elif message.text == "📊 Проверить мои транзакции":
+        show_transaction_debug(message)
+
+    admin_broadcast_menu(message)
+
+def show_transaction_debug(message):
+        """Показывает отладочную информацию о транзакциях"""
+        user_id = str(message.from_user.id)
+
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+
+            # Получаем информацию о пользователе
+            cursor.execute('SELECT balance, google_balance FROM users WHERE user_id = ?', (str(user_id),))
+            user_info = cursor.fetchone()
+
+            if not user_info:
+                bot.send_message(user_id, "❌ Пользователь не найден")
+                return
+
+            balance, google_balance = user_info
+
+            # Получаем все транзакции
+            cursor.execute('''
+                SELECT amount, type, description, created_at 
+                FROM transactions 
+                WHERE user_id = ? 
+                ORDER BY created_at
+            ''', (str(user_id),))
+
+            transactions = cursor.fetchall()
+
+            # Группируем по типам
+            type_totals = {}
+            for amount, t_type, description, date in transactions:
+                if t_type not in type_totals:
+                    type_totals[t_type] = 0
+                type_totals[t_type] += amount
+
+            debug_text = f"""🔧 ОТЛАДКА БАЛАНСА {user_id}
+
+    📊 Текущее состояние:
+    • Баланс в БД: {balance}
+    • Баланс из Google: {google_balance}
+
+    📈 Суммы по типам транзакций:"""
+
+            for t_type, total in type_totals.items():
+                debug_text += f"\n• {t_type}: {total:+.0f}"
+
+            debug_text += f"\n\n📋 Все транзакции ({len(transactions)}):\n"
+
+            for amount, t_type, description, date in transactions[-10:]:  # Последние 10
+                date_str = datetime.fromisoformat(date).strftime('%d.%m %H:%M')
+                debug_text += f"\n{amount:+.0f} - {t_type} - {description} ({date_str})"
+
+            conn.close()
+
+            bot.send_message(user_id, debug_text)
+
+        except Exception as e:
+            bot.send_message(user_id, f"❌ Ошибка отладки: {e}")
 
 def update_user_credit_balance(user_id, amount, description):
     """Обновляет кредитный баланс пользователя"""
@@ -2035,25 +2187,26 @@ def create_tracked_poll(admin_id, question, options, allows_multiple_answers=Fal
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
+
         poll_options_json = json.dumps(options, ensure_ascii=False)
-        
+
         cursor.execute('''
             INSERT INTO broadcasts (admin_id, message_text, message_type, 
                                   poll_question, poll_options, allows_multiple_answers,
                                   is_anonymous, status)
             VALUES (?, ?, 'tracked_poll', ?, ?, ?, FALSE, 'scheduled')
         ''', (str(admin_id), f"Опрос: {question}", question, poll_options_json, allows_multiple_answers))
-        
+
         poll_id = cursor.lastrowid
         conn.commit()
         conn.close()
-        
+
         return poll_id
-        
+
     except Exception as e:
         print(f"❌ Ошибка создания отслеживаемого опроса: {e}")
         return None
+
 
 def send_tracked_poll(broadcast_id):
     """Отправляет опрос со скрытым отслеживанием"""
@@ -2091,13 +2244,13 @@ def send_tracked_poll(broadcast_id):
                     allows_multiple_answers=allows_multiple_answers,
                     type='regular'
                 )
-                
+
                 # Сохраняем связь пользователь-опрос для отслеживания
                 cursor.execute('''
                     INSERT INTO tracked_poll_responses (poll_id, user_id, user_name, poll_message_id)
                     VALUES (?, ?, ?, ?)
                 ''', (broadcast_id, user_id, "Ожидание ответа", str(sent_poll.message_id)))
-                
+
                 sent_count += 1
                 time.sleep(0.1)
 
@@ -2120,6 +2273,7 @@ def send_tracked_poll(broadcast_id):
         print(f"❌ Ошибка отправки отслеживаемого опроса: {e}")
         return False, f"Ошибка: {e}"
 
+
 @bot.poll_answer_handler()
 def handle_poll_answer(poll_answer):
     """Перехватывает ответы на опросы и сохраняет кто что ответил"""
@@ -2127,12 +2281,12 @@ def handle_poll_answer(poll_answer):
         user_id = str(poll_answer.user.id)
         poll_id = str(poll_answer.poll_id)
         option_ids = poll_answer.option_ids
-        
+
         print(f"🔍 Получен ответ на опрос: user={user_id}, poll={poll_id}, options={option_ids}")
-        
+
         conn = get_db_connection()
         cursor = conn.cursor()
-        
+
         # Находим какой опрос и какие варианты
         cursor.execute('''
             SELECT br.id, br.poll_question, br.poll_options 
@@ -2140,58 +2294,63 @@ def handle_poll_answer(poll_answer):
             JOIN broadcasts br ON tpr.poll_id = br.id
             WHERE tpr.poll_message_id = ? AND tpr.user_id = ?
         ''', (poll_id, user_id))
-        
+
         poll_data = cursor.fetchone()
-        
+
         if poll_data:
             broadcast_id, question, options_json = poll_data
             options = json.loads(options_json) if options_json else []
-            
+
             # Получаем тексты выбранных вариантов
             selected_options = []
             for option_id in option_ids:
                 if option_id < len(options):
                     selected_options.append(options[option_id])
-            
+
             selected_text = ", ".join(selected_options) if selected_options else "Не выбрано"
-            
+
             # Обновляем запись с ответом пользователя
             cursor.execute('''
                 UPDATE tracked_poll_responses 
                 SET selected_options = ?, user_name = ?, responded_at = ?
                 WHERE poll_message_id = ? AND user_id = ?
             ''', (
-                selected_text, 
+                selected_text,
                 f"{poll_answer.user.first_name or ''} {poll_answer.user.last_name or ''}".strip() or "Аноним",
                 datetime.now().isoformat(),
                 poll_id,
                 user_id
             ))
-            
+
             conn.commit()
             print(f"✅ Ответ сохранен: {user_id} -> {selected_text}")
-        
+
         conn.close()
-        
+
     except Exception as e:
         print(f"❌ Ошибка обработки ответа на опрос: {e}")
+
 
 def get_tracked_poll_statistics(poll_id):
     """Получает детальную статистику по отслеживаемому опросу"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
+
         # Информация об опросе
         cursor.execute('SELECT poll_question, poll_options, sent_count FROM broadcasts WHERE id = ?', (poll_id,))
         poll_info = cursor.fetchone()
-        
+
         if not poll_info:
+            print(f"❌ Опрос с ID {poll_id} не найден в broadcasts")
+            conn.close()
             return None
-            
+
         question, options_json, sent_count = poll_info
         options = json.loads(options_json) if options_json else []
-        
+
+        print(f"🔍 Найден опрос: {question}, варианты: {options}")
+
         # Ответы пользователей
         cursor.execute('''
             SELECT user_id, user_name, selected_options, responded_at 
@@ -2199,29 +2358,32 @@ def get_tracked_poll_statistics(poll_id):
             WHERE poll_id = ? AND selected_options IS NOT NULL
             ORDER BY responded_at
         ''', (poll_id,))
-        
+
         responses = cursor.fetchall()
-        
+
+        print(f"🔍 Найдено ответов: {len(responses)}")
+
         # Общая статистика
-        cursor.execute('SELECT COUNT(*) FROM tracked_poll_responses WHERE poll_id = ? AND selected_options IS NOT NULL', (poll_id,))
+        cursor.execute('SELECT COUNT(*) FROM tracked_poll_responses WHERE poll_id = ? AND selected_options IS NOT NULL',
+                       (poll_id,))
         total_responses = cursor.fetchone()[0]
-        
+
         # Статистика по вариантам
         option_counts = {option: 0 for option in options}
         user_responses = []
-        
+
         for response in responses:
             user_id, user_name, selected_options, responded_at = response
             user_responses.append((user_id, user_name, selected_options, responded_at))
-            
+
             # Считаем варианты (для множественного выбора)
             selected_list = [opt.strip() for opt in selected_options.split(',')]
             for selected in selected_list:
                 if selected in option_counts:
                     option_counts[selected] += 1
-        
+
         conn.close()
-        
+
         return {
             'question': question,
             'options': options,
@@ -2230,54 +2392,194 @@ def get_tracked_poll_statistics(poll_id):
             'option_counts': option_counts,
             'user_responses': user_responses
         }
-        
+
     except Exception as e:
-        print(f"❌ Ошибка получения статистики опроса: {e}")
+        print(f"❌ Ошибка получения статистики опроса {poll_id}: {e}")
         return None
+
+def test_poll_system(message):
+        """Тестовая функция для проверки системы опросов"""
+        user_id = str(message.from_user.id)
+
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+
+            # Проверяем таблицу tracked_poll_responses
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tracked_poll_responses'")
+            table_exists = cursor.fetchone()
+
+            if not table_exists:
+                bot.send_message(user_id, "❌ Таблица tracked_poll_responses не существует!")
+                return
+
+            # Проверяем есть ли опросы
+            cursor.execute("SELECT COUNT(*) FROM broadcasts WHERE message_type = 'tracked_poll'")
+            poll_count = cursor.fetchone()[0]
+
+            # Проверяем есть ли ответы
+            cursor.execute("SELECT COUNT(*) FROM tracked_poll_responses")
+            response_count = cursor.fetchone()[0]
+
+            # Показываем все опросы
+            cursor.execute('''
+                SELECT id, poll_question, sent_count, created_at 
+                FROM broadcasts 
+                WHERE message_type = 'tracked_poll'
+                ORDER BY created_at DESC
+            ''')
+
+            polls = cursor.fetchall()
+
+            test_report = f"""🔍 ТЕСТ СИСТЕМЫ ОПРОСОВ
+
+    📊 Статистика:
+    • Таблица опросов: {'✅' if table_exists else '❌'}
+    • Всего опросов: {poll_count}
+    • Всего ответов в БД: {response_count}
+
+    📋 СПИСОК ОПРОСОВ:"""
+
+            for poll_id, question, sent_count, created_at in polls:
+                # Получаем количество ответов для этого опроса
+                cursor.execute(
+                    'SELECT COUNT(*) FROM tracked_poll_responses WHERE poll_id = ? AND selected_options IS NOT NULL',
+                    (poll_id,))
+                responses_count = cursor.fetchone()[0]
+
+                date_str = datetime.fromisoformat(created_at).strftime('%d.%m %H:%M')
+                test_report += f"\n\n📝 Опрос #{poll_id}"
+                test_report += f"\n❓ {question[:50]}..."
+                test_report += f"\n📨 Отправлен: {sent_count} пользователям"
+                test_report += f"\n✅ Ответов: {responses_count}"
+                test_report += f"\n🕒 Создан: {date_str}"
+
+                # Показываем несколько последних ответов
+                if responses_count > 0:
+                    cursor.execute('''
+                        SELECT user_name, selected_options, responded_at 
+                        FROM tracked_poll_responses 
+                        WHERE poll_id = ? AND selected_options IS NOT NULL
+                        ORDER BY responded_at DESC 
+                        LIMIT 3
+                    ''', (poll_id,))
+
+                    recent_responses = cursor.fetchall()
+                    test_report += f"\n\n📊 Последние ответы:"
+                    for user_name, selected_options, responded_at in recent_responses:
+                        time_str = datetime.fromisoformat(responded_at).strftime('%H:%M')
+                        test_report += f"\n• {user_name}: {selected_options} ({time_str})"
+
+            conn.close()
+
+            if len(test_report) > 4000:
+                parts = [test_report[i:i + 4000] for i in range(0, len(test_report), 4000)]
+                for part in parts:
+                    bot.send_message(user_id, part)
+            else:
+                bot.send_message(user_id, test_report)
+
+        except Exception as e:
+            bot.send_message(user_id, f"❌ Ошибка тестирования: {e}")
+
 
 def show_detailed_tracked_statistics(message, poll_id):
     """Показывает детальную статистику с ответами пользователей"""
     user_id = str(message.from_user.id)
-    
+
+    print(f"🔍 Запрос статистики для опроса #{poll_id} от пользователя {user_id}")
+
     stats = get_tracked_poll_statistics(poll_id)
     if not stats:
-        bot.send_message(user_id, "❌ Статистика для этого опроса не найдена")
+        error_msg = f"""❌ СТАТИСТИКА НЕ НАЙДЕНА
+
+Опрос с ID #{poll_id} не найден или нет данных.
+
+Возможные причины:
+• Опрос еще не создан
+• Опрос не отправлялся пользователям
+• Пользователи еще не ответили на опрос
+• Ошибка в базе данных
+
+Проверьте:
+1. Создан ли опрос через '🎯 Создать отслеживаемый опрос'
+2. Отправлен ли он пользователям
+3. Ответили ли пользователи на опрос"""
+
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add(types.KeyboardButton("🔍 Тест системы опросов"))
+        markup.add(types.KeyboardButton("📋 Список опросов"))
+        markup.add(types.KeyboardButton("🔙 В админ-меню"))
+
+        bot.send_message(user_id, error_msg, reply_markup=markup)
         return
-    
-    report = f"📊 ДЕТАЛЬНАЯ СТАТИСТИКА ОПРОСА\n\n"
+
+    print(f"✅ Статистика найдена: {stats['total_responses']} ответов")
+
+    report = f"📊 ДЕТАЛЬНАЯ СТАТИСТИКА ОПРОСА #{poll_id}\n\n"
     report += f"📝 Вопрос: {stats['question']}\n"
     report += f"👥 Получили опрос: {stats['sent_count']} пользователей\n"
     report += f"✅ Ответили: {stats['total_responses']} пользователей\n"
-    report += f"📊 Охват: {(stats['total_responses']/stats['sent_count']*100) if stats['sent_count'] > 0 else 0:.1f}%\n\n"
-    
-    report += "📈 РАСПРЕДЕЛЕНИЕ ОТВЕТОВ:\n"
-    for option in stats['options']:
-        count = stats['option_counts'].get(option, 0)
-        percentage = (count / stats['total_responses'] * 100) if stats['total_responses'] > 0 else 0
-        report += f"• {option}: {count} ({percentage:.1f}%)\n"
-    
-    report += f"\n👤 ОТВЕТЫ ПОЛЬЗОВАТЕЛЕЙ ({len(stats['user_responses'])}):\n"
-    
-    for i, (user_id, user_name, selected_options, responded_at) in enumerate(stats['user_responses'], 1):
-        date_str = datetime.fromisoformat(responded_at).strftime('%d.%m %H:%M')
-        report += f"{i}. {user_name} (ID: {user_id}): {selected_options} - {date_str}\n"
-        
-        # Разбиваем отчет если слишком длинный
-        if i % 20 == 0 and i < len(stats['user_responses']):
-            bot.send_message(user_id, report)
-            report = "👤 ОТВЕТЫ ПОЛЬЗОВАТЕЛЕЙ (продолжение):\n"
-    
+    report += f"📊 Охват: {(stats['total_responses'] / stats['sent_count'] * 100) if stats['sent_count'] > 0 else 0:.1f}%\n\n"
+
+    if stats['total_responses'] > 0:
+        report += "📈 РАСПРЕДЕЛЕНИЕ ОТВЕТОВ:\n"
+        for option in stats['options']:
+            count = stats['option_counts'].get(option, 0)
+            percentage = (count / stats['total_responses'] * 100) if stats['total_responses'] > 0 else 0
+            bar = "█" * int(percentage / 5)  # Прогресс-бар
+            report += f"• {option}: {count} ({percentage:.1f}%) {bar}\n"
+
+        report += f"\n👤 ОТВЕТЫ ПОЛЬЗОВАТЕЛЕЙ ({len(stats['user_responses'])}):\n\n"
+
+        for i, (user_id_resp, user_name, selected_options, responded_at) in enumerate(stats['user_responses'], 1):
+            date_str = datetime.fromisoformat(responded_at).strftime('%d.%m %H:%M')
+            report += f"{i}. **{user_name}** (ID: `{user_id_resp}`)\n"
+            report += f"   📋 Ответ: {selected_options}\n"
+            report += f"   🕒 Время: {date_str}\n\n"
+
+            # Разбиваем отчет если слишком длинный
+            if i % 10 == 0 and i < len(stats['user_responses']):
+                # Отправляем текущую часть
+                markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+                markup.add(types.KeyboardButton("📋 Список опросов"))
+                markup.add(types.KeyboardButton("🔙 В админ-меню"))
+
+                bot.send_message(user_id, report, parse_mode='Markdown', reply_markup=markup)
+                report = f"👤 ОТВЕТЫ ПОЛЬЗОВАТЕЛЕЙ (продолжение):\n\n"
+    else:
+        report += "ℹ️ Пока нет ответов на этот опрос\n\n"
+        report += "💡 Пользователи видят опрос как обычный, но система отслеживает их ответы."
+
+    # Создаем клавиатуру для возврата
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("📋 Список опросов"))
+    markup.add(types.KeyboardButton("🔍 Тест системы опросов"))
+    markup.add(types.KeyboardButton("🔙 В админ-меню"))
+
     if report:
-        bot.send_message(user_id, report)
+        try:
+            bot.send_message(user_id, report, parse_mode='Markdown', reply_markup=markup)
+        except Exception as e:
+            # Если ошибка форматирования, отправляем без Markdown
+            print(f"⚠️ Ошибка Markdown, отправляем без форматирования: {e}")
+            clean_report = report.replace('*', '').replace('`', '').replace('**', '')
+            if len(clean_report) > 4000:
+                parts = [clean_report[i:i + 4000] for i in range(0, len(clean_report), 4000)]
+                for part in parts:
+                    bot.send_message(user_id, part, reply_markup=markup)
+            else:
+                bot.send_message(user_id, clean_report, reply_markup=markup)
+
 
 def show_tracked_polls_list(message):
     """Показывает список отслеживаемых опросов"""
     user_id = str(message.from_user.id)
-    
+
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
+
         cursor.execute('''
             SELECT id, poll_question, created_at, sent_count 
             FROM broadcasts 
@@ -2285,33 +2587,36 @@ def show_tracked_polls_list(message):
             ORDER BY created_at DESC
             LIMIT 10
         ''')
-        
+
         polls = cursor.fetchall()
         conn.close()
-        
+
         if not polls:
             bot.send_message(user_id, "📊 Нет отслеживаемых опросов")
+            admin_broadcast_menu(message)  # Возвращаем в меню
             return
-        
+
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        
+
         polls_text = "📊 ОТСЛЕЖИВАЕМЫЕ ОПРОСЫ:\n\n"
         for poll_id, question, created_at, sent_count in polls:
             date_str = datetime.fromisoformat(created_at).strftime('%d.%m.%Y')
             polls_text += f"📝 {question}\n"
-            polls_text += f"   🆔 ID: {poll_id} | 📅 {date_str} | 👥 {sent_count} пользователей\n"
-            polls_text += f"   [Показать статистику] -> /stats_{poll_id}\n\n"
-            
+            polls_text += f"   🆔 ID: {poll_id} | 📅 {date_str} | 👥 {sent_count} пользователей\n\n"
+
             # Добавляем кнопку для быстрого доступа
             markup.add(types.KeyboardButton(f"📊 Статистика опроса {poll_id}"))
-        
+
         markup.add(types.KeyboardButton("🔙 В админ-меню"))
-        
+
         bot.send_message(user_id, polls_text, reply_markup=markup)
-        
+
     except Exception as e:
         print(f"❌ Ошибка показа списка опросов: {e}")
         bot.send_message(user_id, "❌ Ошибка загрузки списка опросов")
+
+
+
 
 # Команда для быстрого просмотра статистики
 @bot.message_handler(func=lambda message: message.text.startswith('/stats_'))
@@ -2322,6 +2627,7 @@ def quick_stats_command(message):
         show_detailed_tracked_statistics(message, poll_id)
     except ValueError:
         bot.send_message(message.chat.id, "❌ Неверный ID опроса")
+
 
 def start_tracked_poll_creation(message):
     """Начинает процесс создания отслеживаемого опроса"""
@@ -2341,40 +2647,54 @@ def start_tracked_poll_creation(message):
 
     bot.send_message(user_id, instruction, reply_markup=markup)
 
+
 def handle_tracked_poll_creation(message):
     """Обрабатывает создание отслеживаемого опроса"""
     user_id = str(message.from_user.id)
-    
-    if user_states.get(user_id) == 'creating_tracked_poll_question':
-        user_states[user_id] = 'creating_tracked_poll_options'
-        user_states[f"{user_id}_tracked_poll_question"] = message.text
-        
-        bot.send_message(user_id, "📋 Теперь введите варианты ответов через запятую:")
-        
-    elif user_states.get(user_id) == 'creating_tracked_poll_options':
+
+    if user_states.get(user_id) == 'creating_tracked_poll_options':
         question = user_states.get(f"{user_id}_tracked_poll_question")
         options = [opt.strip() for opt in message.text.split(',') if opt.strip()]
-        
+
         if len(options) < 2:
             bot.send_message(user_id, "❌ Нужно как минимум 2 варианта ответа")
             return
-        
+
         # Создаем отслеживаемый опрос
         poll_id = create_tracked_poll(user_id, question, options)
-        
+
         if poll_id:
-            bot.send_message(user_id, f"✅ Отслеживаемый опрос создан! ID: {poll_id}\n\nОтправляем пользователям...")
-            
+            success_msg = f"""✅ ОТСЛЕЖИВАЕМЫЙ ОПРОС СОЗДАН!
+
+📝 Вопрос: {question}
+📋 Варианты: {', '.join(options)}
+🆔 ID опроса: {poll_id}
+
+Отправляем пользователям..."""
+
+            bot.send_message(user_id, success_msg)
+
             # Отправляем опрос
             success, result = send_tracked_poll(poll_id)
-            
+
             if success:
-                bot.send_message(user_id, f"✅ Опрос отправлен!\n{result}")
+                final_msg = f"""🎉 ОПРОС ОТПРАВЛЕН!
+
+{result}
+
+💡 Теперь вы можете:
+• Посмотреть статистику: '📊 Статистика опросов'
+• Протестировать систему: '🔍 Тест системы опросов'
+• Увидеть кто что ответил: '📋 Список опросов' → выбрать опрос #{poll_id}
+
+📊 Как только пользователи ответят, вы увидите полную статистику!"""
+
+                bot.send_message(user_id, final_msg)
             else:
                 bot.send_message(user_id, f"❌ Ошибка отправки:\n{result}")
         else:
             bot.send_message(user_id, "❌ Ошибка создания опроса")
-        
+
         # Очищаем состояния
         user_states[user_id] = None
         if f"{user_id}_tracked_poll_question" in user_states:
@@ -2555,9 +2875,11 @@ def admin_broadcast_menu(message):
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("📢 Создать рассылку"))
-    markup.add(types.KeyboardButton("🎯 Создать отслеживаемый опрос"))  # Новая кнопка
+    markup.add(types.KeyboardButton("🎯 Создать отслеживаемый опрос"))
     markup.add(types.KeyboardButton("📊 Статистика опросов"))
-    markup.add(types.KeyboardButton("📋 Список опросов"))  # Новая кнопка
+    markup.add(types.KeyboardButton("📋 Список опросов"))
+    markup.add(types.KeyboardButton("🔍 Тест системы опросов")) # Новая кнопка
+    markup.add(types.KeyboardButton("🔧 Исправить балансы"))  # Новая кнопка
     markup.add(types.KeyboardButton("🎪 Создать лотерею"))
     markup.add(types.KeyboardButton("🗑️ Удалить активные лотереи"))
     markup.add(types.KeyboardButton("🧹 Удалить завершенные лотереи"))
@@ -3842,50 +4164,53 @@ def handle_messages(message):
     user_id = str(message.from_user.id)
 
     # Обработка отмены для всех состояний
-    if message.text in ["🔙 Отмена", "🔙 Назад", "🔙 В меню", "Отмена"]:
+    if message.text in ["🔙 Отмена", "🔙 Назад", "🔙 В меню", "Отмена", "🔙 В админ-меню"]:
         user_states[user_id] = None
-        start(message)
+        if message.text == "🔙 В админ-меню":
+            admin_broadcast_menu(message)
+        else:
+            start(message)
         return
 
-    # Проверяем состояния пользователя
-    if user_id in user_states:
-        current_state = user_states[user_id]
+        # Проверяем состояния пользователя
+        if user_id in user_states:
+            current_state = user_states[user_id]
 
-        # Обработка конкретных состояний
-        if current_state == 'waiting_suggestion':
-            handle_suggestion(message)
-            return
-        elif current_state == 'waiting_password':
-            handle_password(message)
-            return
-        elif current_state == 'waiting_credit_amount':
-            handle_credit_amount(message)
-            return
-        elif current_state == 'shopping':
-            handle_shop_selection(message)
-            return
-        elif current_state == 'creating_lottery':
-            handle_admin_lottery_creation(message)
-            return
-        elif current_state == 'creating_broadcast':
-            handle_admin_broadcast_creation(message)
-            return
-        elif current_state == 'selecting_lottery_to_draw':
-            handle_lottery_selection_for_draw(message)
-            return
-        elif current_state == 'creating_quiz_code':
-            handle_quiz_code_creation(message)
-            return
-        elif current_state == 'creating_tracked_poll_question':
-            user_states[user_id] = 'creating_tracked_poll_options'
-            user_states[f"{user_id}_tracked_poll_question"] = message.text
-            bot.send_message(user_id, "📋 Теперь введите варианты ответов через запятую:")
-            return
-        elif current_state == 'creating_tracked_poll_options':
-            handle_tracked_poll_creation(message)
-            return
+            # Обработка конкретных состояний
+            if current_state == 'waiting_suggestion':
+                handle_suggestion(message)
+                return
+            elif current_state == 'waiting_password':
+                handle_password(message)
+                return
+            elif current_state == 'waiting_credit_amount':
+                handle_credit_amount(message)
+                return
+            elif current_state == 'shopping':
+                handle_shop_selection(message)
+                return
+            elif current_state == 'creating_lottery':
+                handle_admin_lottery_creation(message)
+                return
+            elif current_state == 'creating_broadcast':
+                handle_admin_broadcast_creation(message)
+                return
+            elif current_state == 'selecting_lottery_to_draw':
+                handle_lottery_selection_for_draw(message)
+                return
+            elif current_state == 'creating_quiz_code':
+                handle_quiz_code_creation(message)
+                return
+            elif current_state == 'creating_tracked_poll_question':
+                user_states[user_id] = 'creating_tracked_poll_options'
+                user_states[f"{user_id}_tracked_poll_question"] = message.text
+                bot.send_message(user_id, "📋 Теперь введите варианты ответов через запятую:")
+                return
+            elif current_state == 'creating_tracked_poll_options':
+                handle_tracked_poll_creation(message)
+                return
 
-    # Обработка обычных команд
+        # Обработка обычных команд
     handlers = {
         "👤 Профиль": show_profile,
         "📊 История зачислений": show_history,
@@ -3904,10 +4229,12 @@ def handle_messages(message):
         "📊 Мои викторины": show_my_quizzes,
         "📢 Создать рассылку": lambda msg: start_broadcast_creation(msg),
         "🎯 Создать отслеживаемый опрос": lambda msg: start_tracked_poll_creation(msg),
+        "🔍 Тест системы опросов": lambda msg: test_poll_system(msg),
         "📊 Статистика опросов": lambda msg: show_tracked_polls_list(msg),
         "📋 Список опросов": lambda msg: show_tracked_polls_list(msg),
         "📊 Статистика рассылок": handle_admin_broadcast_stats,
         "📋 История рассылок": handle_admin_broadcast_history,
+        "🔧 Исправить балансы": lambda msg: show_balance_fix_menu(msg),
         "🎪 Создать лотерею": lambda msg: start_lottery_creation(msg),
         "🔤 Создать код викторины": lambda msg: start_quiz_code_creation(msg),
         "📊 Статистика викторин": lambda msg: show_quiz_stats(msg),
