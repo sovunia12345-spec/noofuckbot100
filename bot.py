@@ -2248,26 +2248,24 @@ def send_tracked_poll(broadcast_id):
                 # Пробуем отправить сообщение
                 bot.send_chat_action(user_id, 'typing')
 
-                # СОЗДАЕМ КНОПКИ ПРАВИЛЬНО
+                # ПРОСТЫЕ КНОПКИ БЕЗ СЛОЖНЫХ CALLBACK
                 markup = types.InlineKeyboardMarkup()
 
-                if allows_multiple:
-                    # Множественный выбор
-                    for i, option in enumerate(options):
-                        callback_data = f"poll_select:{broadcast_id}:{i}"
+                for i, option in enumerate(options):
+                    if allows_multiple:
+                        # Для множественного выбора
+                        callback_data = f"select:{broadcast_id}:{i}"
                         markup.add(types.InlineKeyboardButton(f"☐ {option}", callback_data=callback_data))
-
-                    markup.add(
-                        types.InlineKeyboardButton("✅ Завершить выбор", callback_data=f"poll_finish:{broadcast_id}"))
-                    message_text = f"📊 ОПРОС (несколько вариантов)\n\n{question}\n\nВыберите варианты и нажмите 'Завершить выбор':"
-                else:
-                    # Одиночный выбор
-                    for i, option in enumerate(options):
-                        callback_data = f"poll_answer:{broadcast_id}:{i}"
+                    else:
+                        # Для одиночного выбора - ПРОСТОЙ CALLBACK
+                        callback_data = f"vote:{broadcast_id}:{i}"
                         markup.add(types.InlineKeyboardButton(option, callback_data=callback_data))
-                    message_text = f"📊 ОПРОС\n\n{question}\n\nВыберите вариант ответа:"
 
-                # Отправляем сообщение
+                if allows_multiple:
+                    markup.add(types.InlineKeyboardButton("✅ Готово", callback_data=f"finish:{broadcast_id}"))
+
+                message_text = f"📊 ОПРОС\n\n{question}\n\nВыберите вариант ответа:"
+
                 bot.send_message(user_id, message_text, reply_markup=markup)
 
                 # Сохраняем в базу
@@ -2278,13 +2276,12 @@ def send_tracked_poll(broadcast_id):
                 ''', (broadcast_id, user_id, "Ожидание ответа", "button_poll"))
 
                 sent_count += 1
-                time.sleep(0.05)  # Небольшая задержка
+                time.sleep(0.05)
 
             except Exception as e:
                 print(f"❌ Не удалось отправить пользователю {user_id}: {e}")
                 failed_count += 1
 
-        # Обновляем статистику
         cursor.execute('''
             UPDATE broadcasts 
             SET sent_count = ?, failed_count = ?, status = 'sent', sent_at = ?
@@ -2301,18 +2298,83 @@ def send_tracked_poll(broadcast_id):
         return False, f"Ошибка: {e}"
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('poll_select:'))
-def handle_poll_select(call):
-    """Обработчик выбора варианта в множественном опросе"""
+# Временное хранилище для множественного выбора
+user_poll_selections = {}
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('vote:'))
+def handle_vote(call):
+    """Обработчик одиночного выбора"""
     try:
         user_id = str(call.from_user.id)
-        parts = call.data.split(':')
-        poll_id = int(parts[1])
-        option_index = int(parts[2])
+        _, poll_id, option_index = call.data.split(':')
+        poll_id = int(poll_id)
+        option_index = int(option_index)
 
-        print(f"🔍 Выбор варианта: пользователь {user_id}, опрос {poll_id}, вариант {option_index}")
+        print(f"🔍 Голос: {user_id}, опрос {poll_id}, вариант {option_index}")
 
-        # Получаем данные опроса
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Получаем опрос
+        cursor.execute('SELECT poll_question, poll_options FROM broadcasts WHERE id = ?', (poll_id,))
+        poll_data = cursor.fetchone()
+
+        if not poll_data:
+            bot.answer_callback_query(call.id, "❌ Опрос не найден")
+            return
+
+        question, options_json = poll_data
+        options = json.loads(options_json)
+        selected = options[option_index]
+
+        # Проверяем, не голосовал ли уже
+        cursor.execute('''
+            SELECT selected_options FROM tracked_poll_responses 
+            WHERE poll_id = ? AND user_id = ? AND selected_options IS NOT NULL
+        ''', (poll_id, user_id))
+
+        if cursor.fetchone():
+            bot.answer_callback_query(call.id, "❌ Вы уже голосовали")
+            return
+
+        # Сохраняем
+        cursor.execute('''
+            UPDATE tracked_poll_responses 
+            SET selected_options = ?, user_name = ?, responded_at = ?
+            WHERE poll_id = ? AND user_id = ?
+        ''', (selected, call.from_user.first_name, datetime.now().isoformat(), poll_id, user_id))
+
+        conn.commit()
+        conn.close()
+
+        # Обновляем сообщение
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text=f"📊 ОПРОС\n\n{question}\n\n✅ Ваш ответ: {selected}\n\nСпасибо!",
+            reply_markup=None
+        )
+
+        bot.answer_callback_query(call.id, f"✅ Выбрано: {selected}")
+        print(f"✅ Голос сохранен: {user_id} -> {selected}")
+
+    except Exception as e:
+        print(f"❌ Ошибка голосования: {e}")
+        bot.answer_callback_query(call.id, "❌ Ошибка")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('select:'))
+def handle_select(call):
+    """Обработчик выбора в множественном опросе"""
+    try:
+        user_id = str(call.from_user.id)
+        _, poll_id, option_index = call.data.split(':')
+        poll_id = int(poll_id)
+        option_index = int(option_index)
+
+        print(f"🔍 Выбор: {user_id}, опрос {poll_id}, вариант {option_index}")
+
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute('SELECT poll_question, poll_options FROM broadcasts WHERE id = ?', (poll_id,))
@@ -2326,13 +2388,13 @@ def handle_poll_select(call):
         options = json.loads(options_json)
         selected_option = options[option_index]
 
-        # Инициализируем выбор пользователя
+        # Инициализируем выбор
         if user_id not in user_poll_selections:
             user_poll_selections[user_id] = {}
         if poll_id not in user_poll_selections[user_id]:
             user_poll_selections[user_id][poll_id] = set()
 
-        # Добавляем/убираем выбор
+        # Добавляем/убираем
         if option_index in user_poll_selections[user_id][poll_id]:
             user_poll_selections[user_id][poll_id].remove(option_index)
             bot.answer_callback_query(call.id, f"❌ Убрано: {selected_option}")
@@ -2344,16 +2406,16 @@ def handle_poll_select(call):
         markup = types.InlineKeyboardMarkup()
         for i, option in enumerate(options):
             if i in user_poll_selections[user_id][poll_id]:
-                callback_data = f"poll_select:{poll_id}:{i}"
+                callback_data = f"select:{poll_id}:{i}"
                 markup.add(types.InlineKeyboardButton(f"✅ {option}", callback_data=callback_data))
             else:
-                callback_data = f"poll_select:{poll_id}:{i}"
+                callback_data = f"select:{poll_id}:{i}"
                 markup.add(types.InlineKeyboardButton(f"☐ {option}", callback_data=callback_data))
 
-        markup.add(types.InlineKeyboardButton("✅ Завершить выбор", callback_data=f"poll_finish:{poll_id}"))
+        markup.add(types.InlineKeyboardButton("✅ Готово", callback_data=f"finish:{poll_id}"))
 
         selected_count = len(user_poll_selections[user_id][poll_id])
-        message_text = f"📊 ОПРОС (несколько вариантов)\n\n{question}\n\nВыбрано: {selected_count} вариант(а/ов)\n\nВыберите варианты и нажмите 'Завершить выбор':"
+        message_text = f"📊 ОПРОС\n\n{question}\n\nВыбрано: {selected_count}\n\nВыберите варианты:"
 
         bot.edit_message_text(
             chat_id=user_id,
@@ -2365,20 +2427,19 @@ def handle_poll_select(call):
         conn.close()
 
     except Exception as e:
-        print(f"❌ Ошибка выбора варианта: {e}")
+        print(f"❌ Ошибка выбора: {e}")
         bot.answer_callback_query(call.id, "❌ Ошибка")
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('poll_finish:'))
-def handle_poll_finish(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith('finish:'))
+def handle_finish(call):
     """Обработчик завершения множественного выбора"""
     try:
         user_id = str(call.from_user.id)
         poll_id = int(call.data.split(':')[1])
 
-        print(f"🔍 Завершение выбора: пользователь {user_id}, опрос {poll_id}")
+        print(f"🔍 Завершение: {user_id}, опрос {poll_id}")
 
-        # Получаем данные опроса
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute('SELECT poll_question, poll_options FROM broadcasts WHERE id = ?', (poll_id,))
@@ -2396,40 +2457,32 @@ def handle_poll_finish(call):
         selected_options = [options[i] for i in selected_indices if i < len(options)]
 
         if not selected_options:
-            bot.answer_callback_query(call.id, "❌ Выберите хотя бы один вариант")
+            bot.answer_callback_query(call.id, "❌ Выберите варианты")
             return
 
         selected_text = ", ".join(selected_options)
 
-        # Проверяем, не отвечал ли уже пользователь
+        # Проверяем, не отвечал ли уже
         cursor.execute('''
             SELECT selected_options FROM tracked_poll_responses 
             WHERE poll_id = ? AND user_id = ? AND selected_options IS NOT NULL
         ''', (poll_id, user_id))
 
-        existing_response = cursor.fetchone()
-
-        if existing_response:
-            bot.answer_callback_query(call.id, "❌ Вы уже отвечали на этот опрос")
+        if cursor.fetchone():
+            bot.answer_callback_query(call.id, "❌ Вы уже отвечали")
             return
 
-        # Сохраняем ответ
+        # Сохраняем
         cursor.execute('''
             UPDATE tracked_poll_responses 
             SET selected_options = ?, user_name = ?, responded_at = ?
             WHERE poll_id = ? AND user_id = ?
-        ''', (
-            selected_text,
-            f"{call.from_user.first_name or 'Пользователь'}",
-            datetime.now().isoformat(),
-            poll_id,
-            user_id
-        ))
+        ''', (selected_text, call.from_user.first_name, datetime.now().isoformat(), poll_id, user_id))
 
         conn.commit()
         conn.close()
 
-        # Очищаем временные данные
+        # Очищаем
         if user_id in user_poll_selections and poll_id in user_poll_selections[user_id]:
             del user_poll_selections[user_id][poll_id]
 
@@ -2437,94 +2490,16 @@ def handle_poll_finish(call):
         bot.edit_message_text(
             chat_id=user_id,
             message_id=call.message.message_id,
-            text=f"📊 ОПРОС\n\n{question}\n\n✅ Ваши ответы: {selected_text}\n\nСпасибо за участие!",
+            text=f"📊 ОПРОС\n\n{question}\n\n✅ Ваши ответы: {selected_text}\n\nСпасибо!",
             reply_markup=None
         )
 
         bot.answer_callback_query(call.id, "✅ Ответ сохранен!")
-        print(f"✅ Множественный ответ сохранен: {user_id} -> {selected_text}")
+        print(f"✅ Ответ сохранен: {user_id} -> {selected_text}")
 
     except Exception as e:
-        print(f"❌ Ошибка завершения выбора: {e}")
+        print(f"❌ Ошибка завершения: {e}")
         bot.answer_callback_query(call.id, "❌ Ошибка")
-
-
-# Временное хранилище для множественного выбора
-user_poll_selections = {}
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('poll_answer:'))
-def handle_poll_answer(call):
-    """Обработчик одиночного выбора"""
-    try:
-        user_id = str(call.from_user.id)
-        parts = call.data.split(':')
-        poll_id = int(parts[1])
-        option_index = int(parts[2])
-
-        print(f"🔍 Обработка ответа: пользователь {user_id}, опрос {poll_id}, вариант {option_index}")
-
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        # Получаем данные опроса
-        cursor.execute('SELECT poll_question, poll_options FROM broadcasts WHERE id = ?', (poll_id,))
-        poll_data = cursor.fetchone()
-
-        if not poll_data:
-            bot.answer_callback_query(call.id, "❌ Опрос не найден")
-            return
-
-        question, options_json = poll_data
-        options = json.loads(options_json)
-        selected_option = options[option_index]
-
-        # Проверяем, не отвечал ли уже пользователь
-        cursor.execute('''
-            SELECT selected_options FROM tracked_poll_responses 
-            WHERE poll_id = ? AND user_id = ? AND selected_options IS NOT NULL
-        ''', (poll_id, user_id))
-
-        existing_response = cursor.fetchone()
-
-        if existing_response:
-            bot.answer_callback_query(call.id, "❌ Вы уже отвечали на этот опрос")
-            return
-
-        # Сохраняем ответ
-        cursor.execute('''
-            UPDATE tracked_poll_responses 
-            SET selected_options = ?, user_name = ?, responded_at = ?
-            WHERE poll_id = ? AND user_id = ?
-        ''', (
-            selected_option,
-            f"{call.from_user.first_name or 'Пользователь'}",
-            datetime.now().isoformat(),
-            poll_id,
-            user_id
-        ))
-
-        conn.commit()
-        conn.close()
-
-        # Обновляем сообщение
-        bot.edit_message_text(
-            chat_id=user_id,
-            message_id=call.message.message_id,
-            text=f"📊 ОПРОС\n\n{question}\n\n✅ Ваш ответ: {selected_option}\n\nСпасибо за участие!",
-            reply_markup=None
-        )
-
-        bot.answer_callback_query(call.id, f"✅ Вы выбрали: {selected_option}")
-        print(f"✅ Ответ сохранен: {user_id} -> {selected_option}")
-
-    except Exception as e:
-        print(f"❌ Ошибка обработки ответа: {e}")
-        try:
-            bot.answer_callback_query(call.id, "❌ Ошибка при сохранении ответа")
-        except:
-            pass
-
 
 def get_tracked_poll_statistics(poll_id):
     """Получает детальную статистику по отслеживаемому опросу"""
@@ -2930,77 +2905,6 @@ def create_broadcast(admin_id, message_text, message_type='text', file_id=None,
     except Exception as e:
         print(f"❌ Ошибка создания рассылки: {e}")
         return None
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('poll_answer_'))
-def handle_button_poll_answer(call):
-        """Обработчик ответов на опросы с кнопками"""
-        try:
-            user_id = str(call.from_user.id)
-            parts = call.data.split('_')
-            broadcast_id = int(parts[2])
-            option_index = int(parts[3])
-
-            conn = get_db_connection()
-            cursor = conn.cursor()
-
-            # Получаем данные опроса
-            cursor.execute('SELECT poll_question, poll_options FROM broadcasts WHERE id = ?', (broadcast_id,))
-            poll_data = cursor.fetchone()
-
-            if poll_data:
-                question, options_json = poll_data
-                options = json.loads(options_json) if options_json else []
-                selected_option = options[option_index] if 0 <= option_index < len(options) else "Неизвестно"
-
-                # Проверяем, не отвечал ли уже пользователь
-                cursor.execute('''
-                    SELECT selected_options FROM tracked_poll_responses 
-                    WHERE poll_id = ? AND user_id = ? AND selected_options IS NOT NULL
-                ''', (broadcast_id, user_id))
-
-                existing_response = cursor.fetchone()
-
-                if existing_response:
-                    bot.answer_callback_query(call.id, f"❌ Вы уже отвечали на этот опрос")
-                    return
-
-                # Обновляем ответ пользователя
-                cursor.execute('''
-                    UPDATE tracked_poll_responses 
-                    SET selected_options = ?, user_name = ?, responded_at = ?
-                    WHERE poll_id = ? AND user_id = ?
-                ''', (
-                    selected_option,
-                    f"{call.from_user.first_name or ''} {call.from_user.last_name or ''}".strip() or "Аноним",
-                    datetime.now().isoformat(),
-                    broadcast_id,
-                    user_id
-                ))
-
-                conn.commit()
-
-                # Подтверждаем ответ
-                bot.answer_callback_query(call.id, f"✅ Вы выбрали: {selected_option}")
-
-                # Обновляем сообщение
-                try:
-                    bot.edit_message_text(
-                        chat_id=user_id,
-                        message_id=call.message.message_id,
-                        text=f"📊 ОПРОС\n\n{question}\n\n✅ Ваш ответ: {selected_option}\n\nСпасибо за участие!",
-                        reply_markup=None
-                    )
-                except Exception as e:
-                    print(f"⚠️ Не удалось обновить сообщение: {e}")
-
-            conn.close()
-
-        except Exception as e:
-            print(f"❌ Ошибка обработки ответа на кнопочный опрос: {e}")
-            try:
-                bot.answer_callback_query(call.id, "❌ Ошибка при сохранении ответа")
-            except:
-                pass
 
 
 def send_broadcast(broadcast_id):
