@@ -360,16 +360,16 @@ def init_balance_db():
             )
         ''')
 
-        # ТАБЛИЦА ДЛЯ ОТСЛЕЖИВАНИЯ ОТВЕТОВ НА ОПРОСЫ
+        # ТАБЛИЦА ДЛЯ ОТСЛЕЖИВАНИЯ ОТВЕТОВ НА ОПРОСЫ (НОВАЯ УПРОЩЕННАЯ ВЕРСИЯ)
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS tracked_poll_responses (
+            CREATE TABLE IF NOT EXISTS poll_responses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 poll_id INTEGER,
                 user_id TEXT,
                 user_name TEXT,
                 selected_options TEXT,
-                poll_message_id TEXT,
-                responded_at TEXT DEFAULT CURRENT_TIMESTAMP
+                responded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         ''')
 
@@ -385,6 +385,9 @@ def upgrade_database():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+
+        # Удаляем старую таблицу опросов если существует
+        cursor.execute("DROP TABLE IF EXISTS tracked_poll_responses")
 
         # Проверяем существующие колонки в broadcasts
         cursor.execute("PRAGMA table_info(broadcasts)")
@@ -902,6 +905,7 @@ def fix_all_balances():
         print(f"❌ Ошибка исправления балансов: {e}")
         return 0
 
+
 def show_balance_fix_menu(message):
     """Меню для исправления проблем с балансами"""
     user_id = str(message.from_user.id)
@@ -945,42 +949,43 @@ def handle_balance_fix(message):
     else:
         admin_broadcast_menu(message)
 
+
 def show_transaction_debug(message):
-        """Показывает отладочную информацию о транзакциях"""
-        user_id = str(message.from_user.id)
+    """Показывает отладочную информацию о транзакциях"""
+    user_id = str(message.from_user.id)
 
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-            # Получаем информацию о пользователе
-            cursor.execute('SELECT balance, google_balance FROM users WHERE user_id = ?', (str(user_id),))
-            user_info = cursor.fetchone()
+        # Получаем информацию о пользователе
+        cursor.execute('SELECT balance, google_balance FROM users WHERE user_id = ?', (str(user_id),))
+        user_info = cursor.fetchone()
 
-            if not user_info:
-                bot.send_message(user_id, "❌ Пользователь не найден")
-                return
+        if not user_info:
+            bot.send_message(user_id, "❌ Пользователь не найден")
+            return
 
-            balance, google_balance = user_info
+        balance, google_balance = user_info
 
-            # Получаем все транзакции
-            cursor.execute('''
+        # Получаем все транзакции
+        cursor.execute('''
                 SELECT amount, type, description, created_at 
                 FROM transactions 
                 WHERE user_id = ? 
                 ORDER BY created_at
             ''', (str(user_id),))
 
-            transactions = cursor.fetchall()
+        transactions = cursor.fetchall()
 
-            # Группируем по типам
-            type_totals = {}
-            for amount, t_type, description, date in transactions:
-                if t_type not in type_totals:
-                    type_totals[t_type] = 0
-                type_totals[t_type] += amount
+        # Группируем по типам
+        type_totals = {}
+        for amount, t_type, description, date in transactions:
+            if t_type not in type_totals:
+                type_totals[t_type] = 0
+            type_totals[t_type] += amount
 
-            debug_text = f"""🔧 ОТЛАДКА БАЛАНСА {user_id}
+        debug_text = f"""🔧 ОТЛАДКА БАЛАНСА {user_id}
 
     📊 Текущее состояние:
     • Баланс в БД: {balance}
@@ -988,21 +993,22 @@ def show_transaction_debug(message):
 
     📈 Суммы по типам транзакций:"""
 
-            for t_type, total in type_totals.items():
-                debug_text += f"\n• {t_type}: {total:+.0f}"
+        for t_type, total in type_totals.items():
+            debug_text += f"\n• {t_type}: {total:+.0f}"
 
-            debug_text += f"\n\n📋 Все транзакции ({len(transactions)}):\n"
+        debug_text += f"\n\n📋 Все транзакции ({len(transactions)}):\n"
 
-            for amount, t_type, description, date in transactions[-10:]:  # Последние 10
-                date_str = datetime.fromisoformat(date).strftime('%d.%m %H:%M')
-                debug_text += f"\n{amount:+.0f} - {t_type} - {description} ({date_str})"
+        for amount, t_type, description, date in transactions[-10:]:  # Последние 10
+            date_str = datetime.fromisoformat(date).strftime('%d.%m %H:%M')
+            debug_text += f"\n{amount:+.0f} - {t_type} - {description} ({date_str})"
 
-            conn.close()
+        conn.close()
 
-            bot.send_message(user_id, debug_text)
+        bot.send_message(user_id, debug_text)
 
-        except Exception as e:
-            bot.send_message(user_id, f"❌ Ошибка отладки: {e}")
+    except Exception as e:
+        bot.send_message(user_id, f"❌ Ошибка отладки: {e}")
+
 
 def update_user_credit_balance(user_id, amount, description):
     """Обновляет кредитный баланс пользователя"""
@@ -1764,10 +1770,10 @@ def create_lottery(name, description, ticket_price, max_tickets, duration_days=7
         end_date = start_date + timedelta(days=duration_days)
 
         cursor.execute('''
-            INSERT INTO lotteries (name, description, ticket_price, max_tickets, start_date, end_date)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (name, description, ticket_price, max_tickets,
-              start_date.isoformat(), end_date.isoformat()))
+                INSERT INTO lotteries (name, description, ticket_price, max_tickets, start_date, end_date)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (name, description, ticket_price, max_tickets,
+                  start_date.isoformat(), end_date.isoformat()))
 
         lottery_id = cursor.lastrowid
         conn.commit()
@@ -1834,16 +1840,16 @@ def buy_lottery_ticket(user_id, lottery_id, ticket_count=1):
         for i in range(ticket_count):
             ticket_number = tickets_sold + i + 1
             cursor.execute('''
-                INSERT INTO lottery_tickets (lottery_id, user_id, ticket_number)
-                VALUES (?, ?, ?)
-            ''', (lottery_id, str(user_id), ticket_number))
+                    INSERT INTO lottery_tickets (lottery_id, user_id, ticket_number)
+                    VALUES (?, ?, ?)
+                ''', (lottery_id, str(user_id), ticket_number))
             ticket_numbers.append(ticket_number)
 
         cursor.execute('''
-            UPDATE lotteries 
-            SET tickets_sold = tickets_sold + ?, prize_pool = prize_pool + ? 
-            WHERE id = ?
-        ''', (ticket_count, total_cost, lottery_id))
+                UPDATE lotteries 
+                SET tickets_sold = tickets_sold + ?, prize_pool = prize_pool + ? 
+                WHERE id = ?
+            ''', (ticket_count, total_cost, lottery_id))
 
         conn.commit()
         conn.close()
@@ -1873,11 +1879,11 @@ def draw_lottery_winner(lottery_id):
         lottery_name, prize_pool, tickets_sold = lottery
 
         cursor.execute('''
-            SELECT user_id FROM lottery_tickets 
-            WHERE lottery_id = ? 
-            ORDER BY RANDOM() 
-            LIMIT 1
-        ''', (lottery_id,))
+                SELECT user_id FROM lottery_tickets 
+                WHERE lottery_id = ? 
+                ORDER BY RANDOM() 
+                LIMIT 1
+            ''', (lottery_id,))
 
         winner = cursor.fetchone()
 
@@ -1887,10 +1893,10 @@ def draw_lottery_winner(lottery_id):
             update_user_balance(winner_user_id, prize_pool, 'lottery_win', f'Выигрыш в лотерее #{lottery_id}')
 
             cursor.execute('''
-                UPDATE lotteries 
-                SET winner_user_id = ?, status = 'finished' 
-                WHERE id = ?
-            ''', (winner_user_id, lottery_id))
+                    UPDATE lotteries 
+                    SET winner_user_id = ?, status = 'finished' 
+                    WHERE id = ?
+                ''', (winner_user_id, lottery_id))
 
             conn.commit()
             conn.close()
@@ -1925,10 +1931,10 @@ def generate_updated_lottery_message(lottery_id, user_id):
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT name, description, ticket_price, prize_pool, max_tickets, tickets_sold, end_date 
-            FROM lotteries 
-            WHERE id = ?
-        ''', (lottery_id,))
+                SELECT name, description, ticket_price, prize_pool, max_tickets, tickets_sold, end_date 
+                FROM lotteries 
+                WHERE id = ?
+            ''', (lottery_id,))
 
         lottery = cursor.fetchone()
 
@@ -1997,11 +2003,11 @@ def show_lottery_menu(message):
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT id, name, description, ticket_price, prize_pool, max_tickets, tickets_sold, end_date 
-            FROM lotteries 
-            WHERE status = 'active'
-            ORDER BY created_at DESC
-        ''')
+                SELECT id, name, description, ticket_price, prize_pool, max_tickets, tickets_sold, end_date 
+                FROM lotteries 
+                WHERE status = 'active'
+                ORDER BY created_at DESC
+            ''')
 
         lotteries = cursor.fetchall()
         conn.close()
@@ -2083,10 +2089,10 @@ def show_my_tickets(user_id, lottery_id):
         lottery_name = cursor.fetchone()[0]
 
         cursor.execute('''
-            SELECT ticket_number FROM lottery_tickets 
-            WHERE lottery_id = ? AND user_id = ? 
-            ORDER BY ticket_number
-        ''', (lottery_id, user_id))
+                SELECT ticket_number FROM lottery_tickets 
+                WHERE lottery_id = ? AND user_id = ? 
+                ORDER BY ticket_number
+            ''', (lottery_id, user_id))
 
         tickets = cursor.fetchall()
         conn.close()
@@ -2106,24 +2112,657 @@ def show_my_tickets(user_id, lottery_id):
         bot.send_message(user_id, "❌ Ошибка загрузки билетов")
 
 
+# ================== СИСТЕМА ОПРОСОВ (НОВАЯ УПРОЩЕННАЯ ВЕРСИЯ) ==================
+def create_button_poll(admin_id, question, options, allows_multiple=False):
+    """Создает опрос на кнопках (по аналогии с лотереями)"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Сохраняем опрос в базу
+        poll_options_json = json.dumps(options, ensure_ascii=False)
+
+        cursor.execute('''
+                INSERT INTO broadcasts (admin_id, message_text, message_type, 
+                                      poll_question, poll_options, allows_multiple_answers, status)
+                VALUES (?, ?, 'button_poll', ?, ?, ?, 'scheduled')
+            ''', (str(admin_id), f"Опрос: {question}", question, poll_options_json, allows_multiple))
+
+        poll_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+
+        print(f"✅ Создан опрос #{poll_id}: {question}")
+        return poll_id
+
+    except Exception as e:
+        print(f"❌ Ошибка создания опроса: {e}")
+        return None
+
+
+def send_button_poll_to_user(user_id, poll_id, question, options, allows_multiple=False):
+    """Отправляет опрос пользователю (как лотерею)"""
+    try:
+        # Создаем кнопки как в лотерее
+        markup = types.InlineKeyboardMarkup(row_width=1)
+
+        if allows_multiple:
+            # Множественный выбор - с флажками
+            for i, option in enumerate(options):
+                callback_data = f"poll_select_{poll_id}_{i}"
+                markup.add(types.InlineKeyboardButton(f"☐ {option}", callback_data=callback_data))
+
+            markup.add(types.InlineKeyboardButton("✅ Завершить выбор", callback_data=f"poll_finish_{poll_id}"))
+        else:
+            # Одиночный выбор
+            for i, option in enumerate(options):
+                callback_data = f"poll_answer_{poll_id}_{i}"
+                markup.add(types.InlineKeyboardButton(option, callback_data=callback_data))
+
+        message_text = f"📊 ОПРОС\n\n{question}\n\nВыберите вариант ответа:"
+
+        # Отправляем сообщение
+        bot.send_message(user_id, message_text, reply_markup=markup)
+
+        # Сохраняем в базу для отслеживания
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+                INSERT OR REPLACE INTO poll_responses 
+                (poll_id, user_id, user_name)
+                VALUES (?, ?, ?)
+            ''', (poll_id, user_id, "Ожидание ответа"))
+        conn.commit()
+        conn.close()
+
+        return True
+
+    except Exception as e:
+        print(f"❌ Ошибка отправки опроса пользователю {user_id}: {e}")
+        return False
+
+
+def send_button_poll_to_all(poll_id):
+    """Отправляет опрос на кнопках всем пользователям"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Получаем данные опроса
+        cursor.execute('''
+                SELECT poll_question, poll_options, allows_multiple_answers 
+                FROM broadcasts WHERE id = ?
+            ''', (poll_id,))
+        poll_data = cursor.fetchone()
+
+        if not poll_data:
+            return False, "Опрос не найден"
+
+        question, options_json, allows_multiple = poll_data
+        options = json.loads(options_json) if options_json else []
+
+        # Получаем всех пользователей
+        cursor.execute('SELECT user_id FROM users')
+        users = cursor.fetchall()
+
+        sent_count = 0
+        failed_count = 0
+
+        for user_tuple in users:
+            user_id = user_tuple[0]
+            try:
+                if send_button_poll_to_user(user_id, poll_id, question, options, allows_multiple):
+                    sent_count += 1
+                else:
+                    failed_count += 1
+
+                time.sleep(0.05)  # Чтобы не превысить лимиты Telegram
+
+            except Exception as e:
+                print(f"❌ Ошибка отправки пользователю {user_id}: {e}")
+                failed_count += 1
+
+        # Обновляем статистику
+        cursor.execute('''
+                UPDATE broadcasts 
+                SET sent_count = ?, failed_count = ?, status = 'sent', sent_at = ?
+                WHERE id = ?
+            ''', (sent_count, failed_count, datetime.now().isoformat(), poll_id))
+
+        conn.commit()
+        conn.close()
+
+        return True, f"✅ Отправлено: {sent_count}, Не удалось: {failed_count}"
+
+    except Exception as e:
+        print(f"❌ Ошибка отправки опроса: {e}")
+        return False, f"Ошибка: {e}"
+
+
+# Временное хранилище для множественного выбора
+user_poll_selections = {}
+
+
+def handle_single_poll(call, user_id, poll_id, option_index):
+    """Обработчик одиночного выбора"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Получаем опрос
+        cursor.execute('SELECT poll_question, poll_options FROM broadcasts WHERE id = ?', (poll_id,))
+        poll_data = cursor.fetchone()
+
+        if not poll_data:
+            bot.answer_callback_query(call.id, "❌ Опрос не найден")
+            return
+
+        question, options_json = poll_data
+        options = json.loads(options_json)
+        selected = options[option_index]
+
+        # Проверяем, не голосовал ли уже
+        cursor.execute('''
+                SELECT selected_options FROM poll_responses 
+                WHERE poll_id = ? AND user_id = ? AND selected_options IS NOT NULL
+            ''', (poll_id, user_id))
+
+        if cursor.fetchone():
+            bot.answer_callback_query(call.id, "❌ Вы уже голосовали")
+            conn.close()
+            return
+
+        # Сохраняем ответ
+        cursor.execute('''
+                UPDATE poll_responses 
+                SET selected_options = ?, user_name = ?, responded_at = ?
+                WHERE poll_id = ? AND user_id = ?
+            ''', (
+            selected,
+            call.from_user.first_name or "Пользователь",
+            datetime.now().isoformat(),
+            poll_id,
+            user_id
+        ))
+
+        conn.commit()
+        conn.close()
+
+        # Обновляем сообщение КАК В ЛОТЕРЕЕ
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text=f"📊 ОПРОС\n\n{question}\n\n✅ Ваш ответ: {selected}\n\nСпасибо за участие!",
+            reply_markup=None
+        )
+
+        bot.answer_callback_query(call.id, f"✅ Выбрано: {selected}")
+        print(f"✅ Голос сохранен: {user_id} -> {selected}")
+
+    except Exception as e:
+        print(f"❌ Ошибка одиночного выбора: {e}")
+        bot.answer_callback_query(call.id, "❌ Ошибка")
+
+
+def handle_multiple_select(call, user_id, poll_id, option_index):
+    """Обработчик выбора в множественном опросе"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT poll_question, poll_options FROM broadcasts WHERE id = ?', (poll_id,))
+        poll_data = cursor.fetchone()
+
+        if not poll_data:
+            bot.answer_callback_query(call.id, "❌ Опрос не найден")
+            return
+
+        question, options_json = poll_data
+        options = json.loads(options_json)
+        selected_option = options[option_index]
+
+        # Инициализируем выбор
+        if user_id not in user_poll_selections:
+            user_poll_selections[user_id] = {}
+        if poll_id not in user_poll_selections[user_id]:
+            user_poll_selections[user_id][poll_id] = set()
+
+        # Добавляем/убираем выбор
+        if option_index in user_poll_selections[user_id][poll_id]:
+            user_poll_selections[user_id][poll_id].remove(option_index)
+            bot.answer_callback_query(call.id, f"❌ Убрано: {selected_option}")
+        else:
+            user_poll_selections[user_id][poll_id].add(option_index)
+            bot.answer_callback_query(call.id, f"✅ Выбрано: {selected_option}")
+
+        # Обновляем сообщение
+        markup = types.InlineKeyboardMarkup()
+        for i, option in enumerate(options):
+            if i in user_poll_selections[user_id][poll_id]:
+                callback_data = f"poll_select_{poll_id}_{i}"
+                markup.add(types.InlineKeyboardButton(f"✅ {option}", callback_data=callback_data))
+            else:
+                callback_data = f"poll_select_{poll_id}_{i}"
+                markup.add(types.InlineKeyboardButton(f"☐ {option}", callback_data=callback_data))
+
+        markup.add(types.InlineKeyboardButton("✅ Завершить выбор", callback_data=f"poll_finish_{poll_id}"))
+
+        selected_count = len(user_poll_selections[user_id][poll_id])
+        message_text = f"📊 ОПРОС\n\n{question}\n\nВыбрано: {selected_count} вариант(а/ов)\n\nВыберите варианты:"
+
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text=message_text,
+            reply_markup=markup
+        )
+
+        conn.close()
+
+    except Exception as e:
+        print(f"❌ Ошибка множественного выбора: {e}")
+        bot.answer_callback_query(call.id, "❌ Ошибка")
+
+
+def handle_finish_poll(call, user_id, poll_id):
+    """Обработчик завершения множественного выбора"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT poll_question, poll_options FROM broadcasts WHERE id = ?', (poll_id,))
+        poll_data = cursor.fetchone()
+
+        if not poll_data:
+            bot.answer_callback_query(call.id, "❌ Опрос не найден")
+            return
+
+        question, options_json = poll_data
+        options = json.loads(options_json)
+
+        # Получаем выбранные варианты
+        selected_indices = user_poll_selections.get(user_id, {}).get(poll_id, set())
+        selected_options = [options[i] for i in selected_indices if i < len(options)]
+
+        if not selected_options:
+            bot.answer_callback_query(call.id, "❌ Выберите варианты")
+            return
+
+        selected_text = ", ".join(selected_options)
+
+        # Проверяем, не отвечал ли уже
+        cursor.execute('''
+                SELECT selected_options FROM poll_responses 
+                WHERE poll_id = ? AND user_id = ? AND selected_options IS NOT NULL
+            ''', (poll_id, user_id))
+
+        if cursor.fetchone():
+            bot.answer_callback_query(call.id, "❌ Вы уже отвечали")
+            conn.close()
+            return
+
+        # Сохраняем ответ
+        cursor.execute('''
+                UPDATE poll_responses 
+                SET selected_options = ?, user_name = ?, responded_at = ?
+                WHERE poll_id = ? AND user_id = ?
+            ''', (
+            selected_text,
+            call.from_user.first_name or "Пользователь",
+            datetime.now().isoformat(),
+            poll_id,
+            user_id
+        ))
+
+        conn.commit()
+        conn.close()
+
+        # Очищаем временные данные
+        if user_id in user_poll_selections and poll_id in user_poll_selections[user_id]:
+            del user_poll_selections[user_id][poll_id]
+
+        # Обновляем сообщение
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text=f"📊 ОПРОС\n\n{question}\n\n✅ Ваши ответы: {selected_text}\n\nСпасибо за участие!",
+            reply_markup=None
+        )
+
+        bot.answer_callback_query(call.id, "✅ Ответ сохранен!")
+        print(f"✅ Ответ сохранен: {user_id} -> {selected_text}")
+
+    except Exception as e:
+        print(f"❌ Ошибка завершения: {e}")
+        bot.answer_callback_query(call.id, "❌ Ошибка")
+
+
+def get_poll_results(poll_id):
+    """Получает результаты опроса в простом формате"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute('''
+                SELECT poll_question, poll_options, allows_multiple_answers 
+                FROM broadcasts WHERE id = ?
+            ''', (poll_id,))
+        poll_info = cursor.fetchone()
+
+        if not poll_info:
+            return None
+
+        question, options_json, allows_multiple = poll_info
+        options = json.loads(options_json) if options_json else []
+
+        # Получаем ответы
+        cursor.execute('''
+                SELECT user_id, user_name, selected_options, responded_at 
+                FROM poll_responses 
+                WHERE poll_id = ? AND selected_options IS NOT NULL
+                ORDER BY responded_at
+            ''', (poll_id,))
+
+        responses = cursor.fetchall()
+        conn.close()
+
+        # Считаем статистику
+        option_counts = {option: 0 for option in options}
+        user_responses = []
+
+        for user_id, user_name, selected_options, responded_at in responses:
+            user_responses.append({
+                'user_id': user_id,
+                'user_name': user_name,
+                'answer': selected_options,
+                'time': responded_at
+            })
+
+            # Считаем голоса
+            if allows_multiple:
+                # Для множественного выбора
+                selected_list = [opt.strip() for opt in selected_options.split(',')]
+                for selected in selected_list:
+                    if selected in option_counts:
+                        option_counts[selected] += 1
+            else:
+                # Для одиночного выбора
+                if selected_options in option_counts:
+                    option_counts[selected_options] += 1
+
+        return {
+            'question': question,
+            'options': options,
+            'total_responses': len(responses),
+            'option_counts': option_counts,
+            'user_responses': user_responses,
+            'allows_multiple': allows_multiple
+        }
+
+    except Exception as e:
+        print(f"❌ Ошибка получения результатов опроса: {e}")
+        return None
+
+
+def show_poll_statistics(message, poll_id):
+    """Показывает статистику опроса"""
+    user_id = str(message.from_user.id)
+
+    print(f"🔍 Запрос статистики для опроса #{poll_id}")
+
+    stats = get_poll_results(poll_id)
+    if not stats:
+        bot.send_message(user_id, f"❌ Нет данных для опроса #{poll_id}")
+        show_poll_statistics_menu(message)
+        return
+
+    # Формируем отчет
+    report = f"📊 СТАТИСТИКА ОПРОСА #{poll_id}\n\n"
+    report += f"❓ Вопрос: {stats['question']}\n\n"
+    report += f"📊 ОБЩАЯ СТАТИСТИКА:\n"
+    report += f"• ✅ Ответили: {stats['total_responses']} чел.\n\n"
+
+    report += "📈 РАСПРЕДЕЛЕНИЕ ОТВЕТОВ:\n"
+    for option in stats['options']:
+        count = stats['option_counts'].get(option, 0)
+        percentage = (count / stats['total_responses'] * 100) if stats['total_responses'] > 0 else 0
+        report += f"• {option}: {count} чел. ({percentage:.1f}%)\n"
+
+    report += f"\n👤 ОТВЕТИВШИЕ ПОЛЬЗОВАТЕЛИ ({len(stats['user_responses'])}):\n"
+
+    # Показываем пользователей
+    for i, response in enumerate(stats['user_responses'], 1):
+        time_str = datetime.fromisoformat(response['time']).strftime('%d.%m %H:%M') if response['time'] else "N/A"
+        report += f"\n{i}. {response['user_name']}:\n"
+        report += f"   📋 Ответ: {response['answer']}\n"
+        report += f"   🕒 Время: {time_str}"
+
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("📊 Статистика опросов"))
+    markup.add(types.KeyboardButton("🔙 В админ-меню"))
+
+    # Отправляем частями если длинный
+    if len(report) > 4000:
+        parts = [report[i:i + 4000] for i in range(0, len(report), 4000)]
+        for part in parts:
+            bot.send_message(user_id, part)
+        bot.send_message(user_id, "Выберите действие:", reply_markup=markup)
+    else:
+        bot.send_message(user_id, report, reply_markup=markup)
+
+
+def show_poll_statistics_menu(message):
+    """Показывает меню статистики опросов"""
+    user_id = str(message.from_user.id)
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Получаем все опросы
+        cursor.execute('''
+                SELECT id, poll_question, created_at, sent_count 
+                FROM broadcasts 
+                WHERE message_type = 'button_poll' AND status = 'sent'
+                ORDER BY created_at DESC
+                LIMIT 10
+            ''')
+
+        polls = cursor.fetchall()
+        conn.close()
+
+        if not polls:
+            bot.send_message(user_id, "📊 Нет отправленных опросов")
+            admin_broadcast_menu(message)
+            return
+
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+
+        # Создаем кнопки для каждого опроса
+        for poll_id, question, created_at, sent_count in polls:
+            # Сокращаем длинный вопрос для кнопки
+            short_question = question[:30] + "..." if len(question) > 30 else question
+            date_str = datetime.fromisoformat(created_at).strftime('%d.%m')
+            button_text = f"📊 {poll_id}: {short_question} ({date_str})"
+            markup.add(types.KeyboardButton(button_text))
+
+        markup.add(types.KeyboardButton("🔙 В админ-меню"))
+
+        # Краткая информация
+        info_text = "📊 СТАТИСТИКА ОПРОСОВ\n\n"
+        info_text += f"Всего опросов: {len(polls)}\n\n"
+        info_text += "Выберите опрос для просмотра детальной статистики:"
+
+        bot.send_message(user_id, info_text, reply_markup=markup)
+
+    except Exception as e:
+        print(f"❌ Ошибка показа меню статистики: {e}")
+        bot.send_message(user_id, "❌ Ошибка загрузки статистики")
+
+
+def start_button_poll_creation(message):
+    """Начинает процесс создания опроса на кнопках"""
+    user_id = str(message.from_user.id)
+    user_states[user_id] = 'creating_button_poll_question'
+
+    instruction = """🎯 СОЗДАНИЕ ОПРОСА НА КНОПКАХ
+
+    Введите вопрос для опроса:
+
+    Для отмены нажмите кнопку '🔙 Отмена'"""
+
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("🔙 Отмена"))
+
+    bot.send_message(user_id, instruction, reply_markup=markup)
+
+
+def handle_button_poll_creation(message):
+    """Обрабатывает создание опроса на кнопках"""
+    user_id = str(message.from_user.id)
+
+    if message.text in ["🔙 Отмена", "🔙 Назад"]:
+        user_states[user_id] = None
+        admin_broadcast_menu(message)
+        return
+
+    if user_states.get(user_id) == 'creating_button_poll_question':
+        question = message.text.strip()
+        if len(question) < 5:
+            bot.send_message(user_id, "❌ Вопрос должен содержать минимум 5 символов")
+            return
+
+        user_states[user_id] = 'creating_button_poll_options'
+        user_states[f"{user_id}_poll_question"] = question
+
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add(types.KeyboardButton("🔙 Отмена"))
+
+        bot.send_message(
+            user_id,
+            "📋 Теперь введите варианты ответов через запятую:\n\n"
+            "Пример: Да, Нет, Затрудняюсь ответить\n\n"
+            "Минимум 2 варианта:",
+            reply_markup=markup
+        )
+
+    elif user_states.get(user_id) == 'creating_button_poll_options':
+        question = user_states.get(f"{user_id}_poll_question")
+        options = [opt.strip() for opt in message.text.split(',') if opt.strip()]
+
+        if len(options) < 2:
+            bot.send_message(user_id, "❌ Нужно как минимум 2 варианта ответа")
+            return
+
+        user_states[user_id] = 'creating_button_poll_type'
+        user_states[f"{user_id}_poll_options"] = options
+
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add(types.KeyboardButton("✅ Один вариант"))
+        markup.add(types.KeyboardButton("✅✅ Несколько вариантов"))
+        markup.add(types.KeyboardButton("🔙 Отмена"))
+
+        bot.send_message(
+            user_id,
+            "🎯 Выберите тип опроса:\n\n"
+            "• ✅ Один вариант - пользователь может выбрать только один ответ\n"
+            "• ✅✅ Несколько вариантов - пользователь может выбрать несколько ответов",
+            reply_markup=markup
+        )
+
+    elif user_states.get(user_id) == 'creating_button_poll_type':
+        question = user_states.get(f"{user_id}_poll_question")
+        options = user_states.get(f"{user_id}_poll_options")
+
+        if message.text == "✅ Один вариант":
+            allows_multiple = False
+        elif message.text == "✅✅ Несколько вариантов":
+            allows_multiple = True
+        else:
+            bot.send_message(user_id, "❌ Пожалуйста, выберите тип опроса из кнопок")
+            return
+
+        # Создаем опрос
+        poll_id = create_button_poll(user_id, question, options, allows_multiple)
+
+        if poll_id:
+            poll_type = "с одним вариантом" if not allows_multiple else "с множественным выбором"
+            success_msg = f"""✅ ОПРОС СОЗДАН!
+
+    📝 Вопрос: {question}
+    📋 Варианты: {', '.join(options)}
+    🎯 Тип: {poll_type}
+    🆔 ID опроса: {poll_id}
+
+    Отправляем пользователям..."""
+
+            bot.send_message(user_id, success_msg)
+
+            # Отправляем опрос
+            success, result = send_button_poll_to_all(poll_id)
+
+            if success:
+                final_msg = f"""🎉 ОПРОС ОТПРАВЛЕН!
+
+    {result}"""
+                bot.send_message(user_id, final_msg)
+            else:
+                bot.send_message(user_id, f"❌ Ошибка отправки:\n{result}")
+
+        else:
+            bot.send_message(user_id, "❌ Ошибка создания опроса")
+
+        # Очищаем состояния
+        user_states[user_id] = None
+        if f"{user_id}_poll_question" in user_states:
+            del user_states[f"{user_id}_poll_question"]
+        if f"{user_id}_poll_options" in user_states:
+            del user_states[f"{user_id}_poll_options"]
+
+        admin_broadcast_menu(message)
+
+
 # ================== ОБРАБОТЧИКИ CALLBACK ==================
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
-    """Обработчик callback-запросов"""
+    """Обработчик callback-запросов для ВСЕХ типов"""
     user_id = str(call.from_user.id)
 
     if call.from_user.is_bot:
         try:
-            bot.answer_callback_query(call.id, "❌ Боты не могут участвовать в лотереях")
+            bot.answer_callback_query(call.id, "❌ Боты не могут участвовать")
         except:
             pass
         return
 
     try:
+        print(f"🔍 Callback получен: {call.data} от {user_id}")
+
+        # Обработка лотерей
         if call.data.startswith('buy_ticket_'):
             handle_ticket_purchase(call)
         elif call.data.startswith('my_tickets_'):
             handle_my_tickets(call)
+
+        # Обработка опросов - ТАК ЖЕ КАК У ЛОТЕРЕЙ!
+        elif call.data.startswith('poll_answer_'):
+            # Одиночный выбор: poll_answer_1_0
+            parts = call.data.split('_')
+            poll_id = int(parts[2])
+            option_index = int(parts[3])
+            handle_single_poll(call, user_id, poll_id, option_index)
+
+        elif call.data.startswith('poll_select_'):
+            # Множественный выбор: poll_select_1_0
+            parts = call.data.split('_')
+            poll_id = int(parts[2])
+            option_index = int(parts[3])
+            handle_multiple_select(call, user_id, poll_id, option_index)
+
+        elif call.data.startswith('poll_finish_'):
+            # Завершение: poll_finish_1
+            parts = call.data.split('_')
+            poll_id = int(parts[2])
+            handle_finish_poll(call, user_id, poll_id)
+
     except Exception as e:
         print(f"❌ Необработанная ошибка в callback: {e}")
         try:
@@ -2186,709 +2825,6 @@ def handle_my_tickets(call):
             pass
 
 
-# ================== СИСТЕМА ОТСЛЕЖИВАЕМЫХ ОПРОСОВ ==================
-def create_tracked_poll(admin_id, question, options, allows_multiple_answers=False):
-    """Создает отслеживаемый опрос на кнопках"""
-    try:
-        print(f"🔍 Создание опроса: вопрос='{question}', варианты={options}, множественный={allows_multiple_answers}")
-
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        poll_options_json = json.dumps(options, ensure_ascii=False)
-        print(f"🔍 JSON вариантов: {poll_options_json}")
-
-        cursor.execute('''
-            INSERT INTO broadcasts (admin_id, message_text, message_type, 
-                                  poll_question, poll_options, allows_multiple_answers, status)
-            VALUES (?, ?, 'button_poll', ?, ?, ?, 'scheduled')
-        ''', (str(admin_id), f"Опрос: {question}", question, poll_options_json, allows_multiple_answers))
-
-        poll_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
-
-        print(f"✅ Создан опрос #{poll_id}: {question} (множественный: {allows_multiple_answers})")
-        return poll_id
-
-    except Exception as e:
-        print(f"❌ Ошибка создания опроса: {e}")
-        import traceback
-        traceback.print_exc()  # Покажет полную трассировку ошибки
-        return None
-
-
-def send_tracked_poll(broadcast_id):
-    """Отправляет опрос на кнопках всем пользователям"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        cursor.execute('''
-            SELECT poll_question, poll_options, allows_multiple_answers 
-            FROM broadcasts WHERE id = ?
-        ''', (broadcast_id,))
-
-        broadcast = cursor.fetchone()
-        if not broadcast:
-            return False, "Опрос не найден"
-
-        question, options_json, allows_multiple = broadcast
-        options = json.loads(options_json) if options_json else []
-
-        cursor.execute('SELECT user_id FROM users')
-        users = cursor.fetchall()
-
-        sent_count = 0
-        failed_count = 0
-
-        for user_tuple in users:
-            user_id = user_tuple[0]
-            try:
-                # Пробуем отправить сообщение
-                bot.send_chat_action(user_id, 'typing')
-
-                # СОЗДАЕМ КНОПКИ С ПРАВИЛЬНЫМИ CALLBACK
-                markup = types.InlineKeyboardMarkup()
-
-                for i, option in enumerate(options):
-                    if allows_multiple:
-                        # Для множественного выбора
-                        callback_data = f"poll_select:{broadcast_id}:{i}"  # ИСПРАВЛЕНО
-                        markup.add(types.InlineKeyboardButton(f"☐ {option}", callback_data=callback_data))
-                    else:
-                        # Для одиночного выбора
-                        callback_data = f"poll_answer:{broadcast_id}:{i}"  # ИСПРАВЛЕНО
-                        markup.add(types.InlineKeyboardButton(option, callback_data=callback_data))
-
-                if allows_multiple:
-                    markup.add(types.InlineKeyboardButton("✅ Завершить выбор", callback_data=f"poll_finish:{broadcast_id}"))  # ИСПРАВЛЕНО
-
-                message_text = f"📊 ОПРОС\n\n{question}\n\nВыберите вариант ответа:"
-
-                # ОТЛАДКА
-                print(f"📨 Отправляем опрос {broadcast_id} пользователю {user_id}")
-                print(f"🔘 Варианты: {options}")
-                print(f"📎 Callback для кнопок: poll_answer:{broadcast_id}:0 и т.д.")
-
-                bot.send_message(user_id, message_text, reply_markup=markup)
-
-                # Сохраняем в базу
-                cursor.execute('''
-                    INSERT OR REPLACE INTO tracked_poll_responses 
-                    (poll_id, user_id, user_name, poll_message_id)
-                    VALUES (?, ?, ?, ?)
-                ''', (broadcast_id, user_id, "Ожидание ответа", "button_poll"))
-
-                sent_count += 1
-                time.sleep(0.05)
-
-            except Exception as e:
-                print(f"❌ Не удалось отправить пользователю {user_id}: {e}")
-                failed_count += 1
-
-        cursor.execute('''
-            UPDATE broadcasts 
-            SET sent_count = ?, failed_count = ?, status = 'sent', sent_at = ?
-            WHERE id = ?
-        ''', (sent_count, failed_count, datetime.now().isoformat(), broadcast_id))
-
-        conn.commit()
-        conn.close()
-
-        return True, f"✅ Отправлено: {sent_count}, Не удалось: {failed_count}"
-
-    except Exception as e:
-        print(f"❌ Ошибка отправки опроса: {e}")
-        return False, f"Ошибка: {e}"
-
-
-# Временное хранилище для множественного выбора
-user_poll_selections = {}
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('poll_'))
-def handle_all_polls(call):
-    """УНИВЕРСАЛЬНЫЙ обработчик ВСЕХ опросов"""
-    try:
-        user_id = str(call.from_user.id)
-        print(f"🔍 Callback получен: {call.data} от {user_id}")
-
-        # Разбираем callback_data
-        if call.data.startswith('poll_answer:'):
-            # Одиночный выбор
-            _, poll_id, option_index = call.data.split(':')
-            handle_single_choice(call, user_id, int(poll_id), int(option_index))
-
-        elif call.data.startswith('poll_select:'):
-            # Выбор варианта в множественном
-            _, poll_id, option_index = call.data.split(':')
-            handle_multiple_choice(call, user_id, int(poll_id), int(option_index))
-
-        elif call.data.startswith('poll_finish:'):
-            # Завершение множественного выбора
-            _, poll_id = call.data.split(':')
-            handle_finish_choice(call, user_id, int(poll_id))
-
-    except Exception as e:
-        print(f"❌ Ошибка в обработчике опросов: {e}")
-        try:
-            bot.answer_callback_query(call.id, "❌ Ошибка")
-        except:
-            pass
-
-
-def handle_single_choice(call, user_id, poll_id, option_index):
-    """Обработчик одиночного выбора"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        # Получаем опрос
-        cursor.execute('SELECT poll_question, poll_options FROM broadcasts WHERE id = ?', (poll_id,))
-        poll_data = cursor.fetchone()
-
-        if not poll_data:
-            bot.answer_callback_query(call.id, "❌ Опрос не найден")
-            return
-
-        question, options_json = poll_data
-        options = json.loads(options_json)
-        selected = options[option_index]
-
-        # Проверяем, не голосовал ли уже
-        cursor.execute('''
-            SELECT selected_options FROM tracked_poll_responses 
-            WHERE poll_id = ? AND user_id = ? AND selected_options IS NOT NULL
-        ''', (poll_id, user_id))
-
-        if cursor.fetchone():
-            bot.answer_callback_query(call.id, "❌ Вы уже голосовали")
-            conn.close()
-            return
-
-        # Сохраняем ответ
-        cursor.execute('''
-            UPDATE tracked_poll_responses 
-            SET selected_options = ?, user_name = ?, responded_at = ?
-            WHERE poll_id = ? AND user_id = ?
-        ''', (selected, call.from_user.first_name or "Пользователь", datetime.now().isoformat(), poll_id, user_id))
-
-        conn.commit()
-        conn.close()
-
-        # Обновляем сообщение
-        bot.edit_message_text(
-            chat_id=user_id,
-            message_id=call.message.message_id,
-            text=f"📊 ОПРОС\n\n{question}\n\n✅ Ваш ответ: {selected}\n\nСпасибо за участие!",
-            reply_markup=None
-        )
-
-        bot.answer_callback_query(call.id, f"✅ Выбрано: {selected}")
-        print(f"✅ Голос сохранен: {user_id} -> {selected}")
-
-    except Exception as e:
-        print(f"❌ Ошибка одиночного выбора: {e}")
-        bot.answer_callback_query(call.id, "❌ Ошибка")
-
-
-def handle_multiple_choice(call, user_id, poll_id, option_index):
-    """Обработчик выбора варианта в множественном опросе"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT poll_question, poll_options FROM broadcasts WHERE id = ?', (poll_id,))
-        poll_data = cursor.fetchone()
-
-        if not poll_data:
-            bot.answer_callback_query(call.id, "❌ Опрос не найден")
-            return
-
-        question, options_json = poll_data
-        options = json.loads(options_json)
-        selected_option = options[option_index]
-
-        # Инициализируем выбор
-        if user_id not in user_poll_selections:
-            user_poll_selections[user_id] = {}
-        if poll_id not in user_poll_selections[user_id]:
-            user_poll_selections[user_id][poll_id] = set()
-
-        # Добавляем/убираем выбор
-        if option_index in user_poll_selections[user_id][poll_id]:
-            user_poll_selections[user_id][poll_id].remove(option_index)
-            bot.answer_callback_query(call.id, f"❌ Убрано: {selected_option}")
-        else:
-            user_poll_selections[user_id][poll_id].add(option_index)
-            bot.answer_callback_query(call.id, f"✅ Выбрано: {selected_option}")
-
-        # Обновляем сообщение
-        markup = types.InlineKeyboardMarkup()
-        for i, option in enumerate(options):
-            if i in user_poll_selections[user_id][poll_id]:
-                callback_data = f"poll_select:{poll_id}:{i}"
-                markup.add(types.InlineKeyboardButton(f"✅ {option}", callback_data=callback_data))
-            else:
-                callback_data = f"poll_select:{poll_id}:{i}"
-                markup.add(types.InlineKeyboardButton(f"☐ {option}", callback_data=callback_data))
-
-        markup.add(types.InlineKeyboardButton("✅ Завершить выбор", callback_data=f"poll_finish:{poll_id}"))
-
-        selected_count = len(user_poll_selections[user_id][poll_id])
-        message_text = f"📊 ОПРОС (несколько вариантов)\n\n{question}\n\nВыбрано: {selected_count} вариант(а/ов)\n\nВыберите варианты и нажмите 'Завершить выбор':"
-
-        bot.edit_message_text(
-            chat_id=user_id,
-            message_id=call.message.message_id,
-            text=message_text,
-            reply_markup=markup
-        )
-
-        conn.close()
-
-    except Exception as e:
-        print(f"❌ Ошибка множественного выбора: {e}")
-        bot.answer_callback_query(call.id, "❌ Ошибка")
-
-
-def handle_finish_choice(call, user_id, poll_id):
-    """Обработчик завершения множественного выбора"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT poll_question, poll_options FROM broadcasts WHERE id = ?', (poll_id,))
-        poll_data = cursor.fetchone()
-
-        if not poll_data:
-            bot.answer_callback_query(call.id, "❌ Опрос не найден")
-            return
-
-        question, options_json = poll_data
-        options = json.loads(options_json)
-
-        # Получаем выбранные варианты
-        selected_indices = user_poll_selections.get(user_id, {}).get(poll_id, set())
-        selected_options = [options[i] for i in selected_indices if i < len(options)]
-
-        if not selected_options:
-            bot.answer_callback_query(call.id, "❌ Выберите хотя бы один вариант")
-            return
-
-        selected_text = ", ".join(selected_options)
-
-        # Проверяем, не отвечал ли уже
-        cursor.execute('''
-            SELECT selected_options FROM tracked_poll_responses 
-            WHERE poll_id = ? AND user_id = ? AND selected_options IS NOT NULL
-        ''', (poll_id, user_id))
-
-        if cursor.fetchone():
-            bot.answer_callback_query(call.id, "❌ Вы уже отвечали")
-            conn.close()
-            return
-
-        # Сохраняем ответ
-        cursor.execute('''
-            UPDATE tracked_poll_responses 
-            SET selected_options = ?, user_name = ?, responded_at = ?
-            WHERE poll_id = ? AND user_id = ?
-        ''', (selected_text, call.from_user.first_name or "Пользователь", datetime.now().isoformat(), poll_id, user_id))
-
-        conn.commit()
-        conn.close()
-
-        # Очищаем временные данные
-        if user_id in user_poll_selections and poll_id in user_poll_selections[user_id]:
-            del user_poll_selections[user_id][poll_id]
-
-        # Обновляем сообщение
-        bot.edit_message_text(
-            chat_id=user_id,
-            message_id=call.message.message_id,
-            text=f"📊 ОПРОС\n\n{question}\n\n✅ Ваши ответы: {selected_text}\n\nСпасибо за участие!",
-            reply_markup=None
-        )
-
-        bot.answer_callback_query(call.id, "✅ Ответ сохранен!")
-        print(f"✅ Множественный ответ сохранен: {user_id} -> {selected_text}")
-
-    except Exception as e:
-        print(f"❌ Ошибка завершения: {e}")
-        bot.answer_callback_query(call.id, "❌ Ошибка")
-
-
-def get_tracked_poll_statistics(poll_id):
-    """Получает детальную статистику по отслеживаемому опросу"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        # Информация об опросе
-        cursor.execute('SELECT poll_question, poll_options, sent_count, allows_multiple_answers FROM broadcasts WHERE id = ?', (poll_id,))
-        poll_info = cursor.fetchone()
-
-        if not poll_info:
-            print(f"❌ Опрос с ID {poll_id} не найден в broadcasts")
-            conn.close()
-            return None
-
-        question, options_json, sent_count, allows_multiple_answers = poll_info
-        options = json.loads(options_json) if options_json else []
-
-        print(f"🔍 Найден опрос: {question}, варианты: {options}")
-
-        # Ответы пользователей
-        cursor.execute('''
-            SELECT user_id, user_name, selected_options, responded_at 
-            FROM tracked_poll_responses 
-            WHERE poll_id = ? AND selected_options IS NOT NULL
-            ORDER BY responded_at
-        ''', (poll_id,))
-
-        responses = cursor.fetchall()
-
-        print(f"🔍 Найдено ответов: {len(responses)}")
-
-        # Статистика по вариантам (для множественного выбора нужно разбирать ответы)
-        option_counts = {option: 0 for option in options}
-        user_responses = []
-
-        for response in responses:
-            user_id, user_name, selected_options, responded_at = response
-            user_responses.append((user_id, user_name, selected_options, responded_at))
-
-            # Для множественного выбора ответы разделены запятыми
-            if allows_multiple_answers and selected_options:
-                selected_list = [opt.strip() for opt in selected_options.split(',')]
-                for selected in selected_list:
-                    if selected in option_counts:
-                        option_counts[selected] += 1
-            else:
-                # Для одиночного выбора
-                if selected_options in option_counts:
-                    option_counts[selected_options] += 1
-
-        conn.close()
-
-        return {
-            'question': question,
-            'options': options,
-            'sent_count': sent_count,
-            'total_responses': len(responses),
-            'option_counts': option_counts,
-            'user_responses': user_responses,
-            'allows_multiple_answers': allows_multiple_answers
-        }
-
-    except Exception as e:
-        print(f"❌ Ошибка получения статистики опроса {poll_id}: {e}")
-        return None
-
-
-def show_simple_poll_statistics(message, poll_id):
-    """Показывает простую статистику опроса"""
-    user_id = str(message.from_user.id)
-
-    print(f"🔍 Запрос статистики для опроса #{poll_id}")
-
-    stats = get_tracked_poll_statistics(poll_id)
-    if not stats:
-        bot.send_message(user_id, f"❌ Нет данных для опроса #{poll_id}")
-        show_poll_statistics_menu(message)
-        return
-
-    # Формируем отчет
-    report = f"📊 СТАТИСТИКА ОПРОСА #{poll_id}\n\n"
-    report += f"❓ Вопрос: {stats['question']}\n\n"
-    report += f"📊 ОБЩАЯ СТАТИСТИКА:\n"
-    report += f"• 👥 Получили опрос: {stats['sent_count']} чел.\n"
-    report += f"• ✅ Ответили: {stats['total_responses']} чел.\n"
-    report += f"• 📈 Охват: {(stats['total_responses'] / stats['sent_count'] * 100) if stats['sent_count'] > 0 else 0:.1f}%\n\n"
-
-    report += "📈 РАСПРЕДЕЛЕНИЕ ОТВЕТОВ:\n"
-    for option in stats['options']:
-        count = stats['option_counts'].get(option, 0)
-        percentage = (count / stats['total_responses'] * 100) if stats['total_responses'] > 0 else 0
-        report += f"• {option}: {count} чел. ({percentage:.1f}%)\n"
-
-    report += f"\n👤 ОТВЕТИВШИЕ ПОЛЬЗОВАТЕЛИ ({len(stats['user_responses'])}):\n"
-
-    # Показываем пользователей
-    for i, (user_id_resp, user_name, selected_options, responded_at) in enumerate(stats['user_responses'], 1):
-        time_str = datetime.fromisoformat(responded_at).strftime('%d.%m %H:%M') if responded_at else "N/A"
-        report += f"\n{i}. {user_name}:\n"
-        report += f"   📋 Ответ: {selected_options}\n"
-        report += f"   🕒 Время: {time_str}"
-
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("📊 Статистика опросов"))
-    markup.add(types.KeyboardButton("🔙 В админ-меню"))
-
-    # Отправляем частями если длинный
-    if len(report) > 4000:
-        parts = [report[i:i + 4000] for i in range(0, len(report), 4000)]
-        for part in parts:
-            bot.send_message(user_id, part)
-        bot.send_message(user_id, "Выберите действие:", reply_markup=markup)
-    else:
-        bot.send_message(user_id, report, reply_markup=markup)
-
-
-def show_poll_statistics_menu(message):
-    """Показывает меню статистики опросов"""
-    user_id = str(message.from_user.id)
-
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        # Получаем все опросы
-        cursor.execute('''
-            SELECT id, poll_question, created_at, sent_count 
-            FROM broadcasts 
-            WHERE message_type = 'button_poll' AND status = 'sent'
-            ORDER BY created_at DESC
-            LIMIT 10
-        ''')
-
-        polls = cursor.fetchall()
-        conn.close()
-
-        if not polls:
-            bot.send_message(user_id, "📊 Нет отправленных опросов")
-            admin_broadcast_menu(message)
-            return
-
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-
-        # Создаем кнопки для каждого опроса
-        for poll_id, question, created_at, sent_count in polls:
-            # Сокращаем длинный вопрос для кнопки
-            short_question = question[:30] + "..." if len(question) > 30 else question
-            date_str = datetime.fromisoformat(created_at).strftime('%d.%m')
-            button_text = f"📊 {poll_id}: {short_question} ({date_str})"
-            markup.add(types.KeyboardButton(button_text))
-
-        markup.add(types.KeyboardButton("🔙 В админ-меню"))
-
-        # Краткая информация
-        info_text = "📊 СТАТИСТИКА ОПРОСОВ\n\n"
-        info_text += f"Всего опросов: {len(polls)}\n\n"
-        info_text += "Выберите опрос для просмотра детальной статистики:"
-
-        bot.send_message(user_id, info_text, reply_markup=markup)
-
-    except Exception as e:
-        print(f"❌ Ошибка показа меню статистики: {e}")
-        bot.send_message(user_id, "❌ Ошибка загрузки статистики")
-
-def show_tracked_polls_list(message):
-    """Показывает список отслеживаемых опросов"""
-    user_id = str(message.from_user.id)
-
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        # ИЩЕМ ОПРОСЫ ПРАВИЛЬНОГО ТИПА
-        cursor.execute('''
-            SELECT id, poll_question, created_at, sent_count 
-            FROM broadcasts 
-            WHERE message_type = 'button_poll' AND status = 'sent'
-            ORDER BY created_at DESC
-            LIMIT 10
-        ''')
-
-        polls = cursor.fetchall()
-        conn.close()
-
-        if not polls:
-            bot.send_message(user_id, "📊 Нет отправленных опросов")
-            admin_broadcast_menu(message)
-            return
-
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-
-        for poll_id, question, created_at, sent_count in polls:
-            short_question = question[:30] + "..." if len(question) > 30 else question
-            date_str = datetime.fromisoformat(created_at).strftime('%d.%m')
-            button_text = f"📊 {poll_id}: {short_question} ({date_str})"
-            markup.add(types.KeyboardButton(button_text))
-
-        markup.add(types.KeyboardButton("🔙 В админ-меню"))
-
-        info_text = "📊 ОТСЛЕЖИВАЕМЫЕ ОПРОСЫ\n\n"
-        info_text += f"Всего опросов: {len(polls)}\n\n"
-        info_text += "Выберите опрос для просмотра статистики:"
-
-        bot.send_message(user_id, info_text, reply_markup=markup)
-
-    except Exception as e:
-        print(f"❌ Ошибка показа списка опросов: {e}")
-        bot.send_message(user_id, "❌ Ошибка загрузки списка опросов")
-
-
-def start_tracked_poll_creation(message):
-    """Начинает процесс создания отслеживаемого опроса"""
-    user_id = str(message.from_user.id)
-    user_states[user_id] = 'creating_tracked_poll_question'
-
-    instruction = """🎯 СОЗДАНИЕ ОТСЛЕЖИВАЕМОГО ОПРОСА
-
-Пользователи увидят опрос как сообщение с кнопками для выбора ответа.
-
-Введите вопрос для опроса:
-
-Для отмены нажмите кнопку '🔙 Отмена'"""
-
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("🔙 Отмена"))
-
-    bot.send_message(user_id, instruction, reply_markup=markup)
-
-
-def handle_tracked_poll_creation(message):
-    """Обрабатывает создание отслеживаемого опроса"""
-    user_id = str(message.from_user.id)
-
-    print(f"🔍 Обработка опроса: состояние={user_states.get(user_id)}, текст='{message.text}'")
-
-    if message.text in ["🔙 Отмена", "🔙 Назад", "🔙 В меню"]:
-        user_states[user_id] = None
-        admin_broadcast_menu(message)
-        return
-
-    if user_states.get(user_id) == 'creating_tracked_poll_type':
-        question = user_states.get(f"{user_id}_tracked_poll_question")
-        options = user_states.get(f"{user_id}_tracked_poll_options")
-
-        print(f"🔍 Получены данные: вопрос='{question}', варианты={options}")
-
-        if message.text == "✅ Один вариант":
-            allows_multiple = False
-        elif message.text == "✅✅ Несколько вариантов":
-            allows_multiple = True
-        else:
-            bot.send_message(user_id, "❌ Пожалуйста, выберите тип опроса из кнопок")
-            return
-
-        # Создаем отслеживаемый опрос
-        print(f"🔍 Создаем опрос с параметрами...")
-        poll_id = create_tracked_poll(user_id, question, options, allows_multiple)
-
-        if poll_id:
-            poll_type = "с одним вариантом" if not allows_multiple else "с множественным выбором"
-            success_msg = f"""✅ ОТСЛЕЖИВАЕМЫЙ ОПРОС СОЗДАН!
-
-📝 Вопрос: {question}
-📋 Варианты: {', '.join(options)}
-🎯 Тип: {poll_type}
-🆔 ID опроса: {poll_id}
-
-Отправляем пользователям..."""
-
-            bot.send_message(user_id, success_msg)
-
-            # Отправляем опрос
-            print(f"🔍 Отправляем опрос #{poll_id} пользователям...")
-            success, result = send_tracked_poll(poll_id)
-
-            if success:
-                final_msg = f"""🎉 ОПРОС ОТПРАВЛЕН!
-
-{result}"""
-                bot.send_message(user_id, final_msg)
-            else:
-                bot.send_message(user_id, f"❌ Ошибка отправки:\n{result}")
-
-            # Возвращаем в админ-меню
-            admin_broadcast_menu(message)
-
-        else:
-            bot.send_message(user_id, "❌ Ошибка создания опроса. Проверьте логи.")
-            admin_broadcast_menu(message)
-
-        # Очищаем состояния
-        user_states[user_id] = None
-        if f"{user_id}_tracked_poll_question" in user_states:
-            del user_states[f"{user_id}_tracked_poll_question"]
-        if f"{user_id}_tracked_poll_options" in user_states:
-            del user_states[f"{user_id}_tracked_poll_options"]
-
-    elif user_states.get(user_id) == 'creating_tracked_poll_options':
-        question = user_states.get(f"{user_id}_tracked_poll_question")
-        options = [opt.strip() for opt in message.text.split(',') if opt.strip()]
-
-        if len(options) < 2:
-            bot.send_message(user_id, "❌ Нужно как минимум 2 варианта ответа")
-            return
-
-        user_states[user_id] = 'creating_tracked_poll_type'
-        user_states[f"{user_id}_tracked_poll_options"] = options
-
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.add(types.KeyboardButton("✅ Один вариант"))
-        markup.add(types.KeyboardButton("✅✅ Несколько вариантов"))
-        markup.add(types.KeyboardButton("🔙 Отмена"))
-
-        bot.send_message(
-            user_id,
-            "🎯 Выберите тип опроса:\n\n"
-            "• ✅ Один вариант - пользователь может выбрать только один ответ\n"
-            "• ✅✅ Несколько вариантов - пользователь может выбрать несколько ответов",
-            reply_markup=markup
-        )
-
-    elif user_states.get(user_id) == 'creating_tracked_poll_question':
-        question = message.text.strip()
-        if len(question) < 5:
-            bot.send_message(user_id, "❌ Вопрос должен содержать минимум 5 символов")
-            return
-
-        user_states[user_id] = 'creating_tracked_poll_options'
-        user_states[f"{user_id}_tracked_poll_question"] = question
-
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.add(types.KeyboardButton("🔙 Отмена"))
-
-        bot.send_message(
-            user_id,
-            "📋 Теперь введите варианты ответов через запятую:\n\n"
-            "Пример: Вариант 1, Вариант 2, Вариант 3\n\n"
-            "Минимум 2 варианта ответа:",
-            reply_markup=markup
-        )
-
-
-def check_database_structure():
-    """Проверяет структуру базы данных"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        # Проверяем таблицу broadcasts
-        cursor.execute("PRAGMA table_info(broadcasts)")
-        columns = cursor.fetchall()
-        print("📋 Структура таблицы broadcasts:")
-        for col in columns:
-            print(f"   {col[1]} ({col[2]})")
-
-        # Проверяем существующие опросы
-        cursor.execute("SELECT id, message_type, poll_question FROM broadcasts WHERE message_type LIKE '%poll%'")
-        polls = cursor.fetchall()
-        print(f"📊 Найдено опросов: {len(polls)}")
-        for poll in polls:
-            print(f"   ID: {poll[0]}, Тип: {poll[1]}, Вопрос: {poll[2]}")
-
-        conn.close()
-    except Exception as e:
-        print(f"❌ Ошибка проверки БД: {e}")
-
-
-# Вызовите эту функцию при запуске бота
-check_database_structure()
-
 # ================== СИСТЕМА РАССЫЛОК И УВЕДОМЛЕНИЙ ==================
 def create_broadcast(admin_id, message_text, message_type='text', file_id=None,
                      poll_question=None, poll_options=None, is_anonymous=True,
@@ -2906,13 +2842,13 @@ def create_broadcast(admin_id, message_text, message_type='text', file_id=None,
         poll_options_json = json.dumps(poll_options, ensure_ascii=False) if poll_options else None
 
         cursor.execute('''
-            INSERT INTO broadcasts (admin_id, message_text, message_type, file_id, 
-                                  poll_question, poll_options, is_anonymous, allows_multiple_answers,
-                                  scheduled_for, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled')
-        ''', (str(admin_id), message_text, message_type, file_id,
-              poll_question, poll_options_json, is_anonymous, allows_multiple_answers,
-              scheduled_for))
+                INSERT INTO broadcasts (admin_id, message_text, message_type, file_id, 
+                                      poll_question, poll_options, is_anonymous, allows_multiple_answers,
+                                      scheduled_for, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled')
+            ''', (str(admin_id), message_text, message_type, file_id,
+                  poll_question, poll_options_json, is_anonymous, allows_multiple_answers,
+                  scheduled_for))
 
         broadcast_id = cursor.lastrowid
         conn.commit()
@@ -2925,24 +2861,22 @@ def create_broadcast(admin_id, message_text, message_type='text', file_id=None,
 
 
 def send_broadcast(broadcast_id):
-    """Отправляет рассылку всем пользователям с поддержкой опросов"""
+    """Отправляет рассылку всем пользователям"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT message_text, message_type, file_id, poll_question, poll_options, 
-                   is_anonymous, allows_multiple_answers 
-            FROM broadcasts WHERE id = ?
-        ''', (broadcast_id,))
+                SELECT message_text, message_type, file_id
+                FROM broadcasts WHERE id = ?
+            ''', (broadcast_id,))
 
         broadcast = cursor.fetchone()
 
         if not broadcast:
             return False, "Рассылка не найдена"
 
-        (message_text, message_type, file_id, poll_question,
-         poll_options_json, is_anonymous, allows_multiple_answers) = broadcast
+        message_text, message_type, file_id = broadcast
 
         cursor.execute('SELECT user_id FROM users')
         users = cursor.fetchall()
@@ -2953,23 +2887,10 @@ def send_broadcast(broadcast_id):
         cursor.execute('UPDATE broadcasts SET status = "sending" WHERE id = ?', (broadcast_id,))
         conn.commit()
 
-        # Десериализуем варианты опроса
-        poll_options = json.loads(poll_options_json) if poll_options_json else None
-
         for user_tuple in users:
             user_id = user_tuple[0]
             try:
-                if message_type == 'poll' and poll_question and poll_options:
-                    # Отправляем опрос
-                    bot.send_poll(
-                        chat_id=user_id,
-                        question=poll_question,
-                        options=poll_options,
-                        is_anonymous=is_anonymous if is_anonymous else True,
-                        allows_multiple_answers=allows_multiple_answers if allows_multiple_answers else False,
-                        type='regular'
-                    )
-                elif message_type == 'photo' and file_id:
+                if message_type == 'photo' and file_id:
                     bot.send_photo(user_id, file_id, caption=message_text)
                 elif message_type == 'document' and file_id:
                     bot.send_document(user_id, file_id, caption=message_text)
@@ -2984,10 +2905,10 @@ def send_broadcast(broadcast_id):
                 failed_count += 1
 
         cursor.execute('''
-            UPDATE broadcasts 
-            SET sent_count = ?, failed_count = ?, status = 'sent', sent_at = ?
-            WHERE id = ?
-        ''', (sent_count, failed_count, datetime.now().isoformat(), broadcast_id))
+                UPDATE broadcasts 
+                SET sent_count = ?, failed_count = ?, status = 'sent', sent_at = ?
+                WHERE id = ?
+            ''', (sent_count, failed_count, datetime.now().isoformat(), broadcast_id))
 
         conn.commit()
         conn.close()
@@ -3039,9 +2960,9 @@ def send_user_notification(user_id, notification_type, title, message, related_i
         cursor = conn.cursor()
 
         cursor.execute('''
-            INSERT INTO user_notifications (user_id, notification_type, title, message, related_id)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (str(user_id), notification_type, title, message, related_id))
+                INSERT INTO user_notifications (user_id, notification_type, title, message, related_id)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (str(user_id), notification_type, title, message, related_id))
 
         conn.commit()
         conn.close()
@@ -3063,7 +2984,7 @@ def admin_broadcast_menu(message):
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("📢 Создать рассылку"))
-    markup.add(types.KeyboardButton("🎯 Создать отслеживаемый опрос"))
+    markup.add(types.KeyboardButton("🎯 Создать опрос на кнопках"))  # Новая кнопка
     markup.add(types.KeyboardButton("📊 Статистика опросов"))
     markup.add(types.KeyboardButton("🔧 Исправить балансы"))
     markup.add(types.KeyboardButton("🎪 Создать лотерею"))
@@ -3079,7 +3000,7 @@ def admin_broadcast_menu(message):
 
 
 def start_broadcast_creation(message):
-    """Начинает процесс создания рассылки с улучшенной обработкой отмены"""
+    """Начинает процесс создания рассылки"""
     user_id = str(message.from_user.id)
     user_states[user_id] = 'creating_broadcast'
 
@@ -3089,11 +3010,6 @@ def start_broadcast_creation(message):
     bot.send_message(
         user_id,
         "✍️ Введите текст рассылки:\n\n"
-        "Вы можете использовать форматирование Markdown:\n"
-        "*жирный* текст\n"
-        "_курсив_ текст\n"
-        "`моноширинный` текст\n"
-        "[ссылка](https://example.com)\n\n"
         "Для отмены нажмите кнопку '🔙 Отмена'",
         reply_markup=markup,
         parse_mode='Markdown'
@@ -3145,23 +3061,23 @@ def handle_admin_broadcast_stats(message):
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT 
-                COUNT(*) as total,
-                SUM(sent_count) as total_sent,
-                SUM(failed_count) as total_failed,
-                AVG(sent_count) as avg_sent
-            FROM broadcasts 
-            WHERE status = 'sent'
-        ''')
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(sent_count) as total_sent,
+                    SUM(failed_count) as total_failed,
+                    AVG(sent_count) as avg_sent
+                FROM broadcasts 
+                WHERE status = 'sent'
+            ''')
         stats = cursor.fetchone()
 
         cursor.execute('''
-            SELECT message_text, sent_count, failed_count, sent_at, message_type
-            FROM broadcasts 
-            WHERE status = 'sent'
-            ORDER BY sent_at DESC 
-            LIMIT 5
-        ''')
+                SELECT message_text, sent_count, failed_count, sent_at, message_type
+                FROM broadcasts 
+                WHERE status = 'sent'
+                ORDER BY sent_at DESC 
+                LIMIT 5
+            ''')
         recent_broadcasts = cursor.fetchall()
 
         conn.close()
@@ -3181,7 +3097,7 @@ def handle_admin_broadcast_stats(message):
             for i, (msg_text, sent, failed, sent_at, msg_type) in enumerate(recent_broadcasts, 1):
                 preview = msg_text[:50] + "..." if len(msg_text) > 50 else msg_text
                 sent_date = datetime.fromisoformat(sent_at).strftime('%d.%m.%Y %H:%M') if sent_at else "Не отправлена"
-                type_emoji = "📊" if msg_type == 'poll' else "📢"
+                type_emoji = "📊" if msg_type == 'button_poll' else "📢"
 
                 stats_text += f"{i}. {type_emoji} {preview}\n"
                 stats_text += f"   📤 {sent} отправлено, ❌ {failed} ошибок\n"
@@ -3206,21 +3122,21 @@ def start_quiz_code_creation(message):
 
     instruction = """🔤 СОЗДАНИЕ КОДА ВИКТОРИНЫ
 
-Отправьте данные в формате:
-Код|Название викторины|Количество XP|Макс. использований
+    Отправьте данные в формате:
+    Код|Название викторины|Количество XP|Макс. использований
 
-Примеры:
-• CHEM001|Викторина по химии|20|50
-• MATH2024|Математика для начинающих|15|100
-• RUSSIAN01|Русский язык тест|25|1
+    Примеры:
+    • CHEM001|Викторина по химии|20|50
+    • MATH2024|Математика для начинающих|15|100
+    • RUSSIAN01|Русский язык тест|25|1
 
-📝 Пояснение полей:
-• Код - уникальное слово (только латиница и цифры)
-• Название - описание викторины
-• XP - опыт за прохождение (10-50)
-• Макс. использований - сколько раз можно использовать код
+    📝 Пояснение полей:
+    • Код - уникальное слово (только латиница и цифры)
+    • Название - описание викторины
+    • XP - опыт за прохождение (10-50)
+    • Макс. использований - сколько раз можно использовать код
 
-Для отмены нажмите кнопку '🔙 Отмена'"""
+    Для отмены нажмите кнопку '🔙 Отмена'"""
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("🔙 Отмена"))
@@ -3303,30 +3219,30 @@ def show_quiz_stats(message):
 
         # Статистика по кодам
         cursor.execute('''
-            SELECT COUNT(*) as total_codes,
-                   SUM(used_count) as total_uses,
-                   AVG(used_count) as avg_uses,
-                   COUNT(*) FILTER (WHERE is_active = TRUE) as active_codes
-            FROM quiz_codes
-        ''')
+                SELECT COUNT(*) as total_codes,
+                       SUM(used_count) as total_uses,
+                       AVG(used_count) as avg_uses,
+                       COUNT(*) FILTER (WHERE is_active = TRUE) as active_codes
+                FROM quiz_codes
+            ''')
         code_stats = cursor.fetchone()
 
         # Статистика по пользователям
         cursor.execute('''
-            SELECT COUNT(DISTINCT user_id) as unique_users,
-                   SUM(xp_earned) as total_xp_given
-            FROM quiz_code_usage
-        ''')
+                SELECT COUNT(DISTINCT user_id) as unique_users,
+                       SUM(xp_earned) as total_xp_given
+                FROM quiz_code_usage
+            ''')
         user_stats = cursor.fetchone()
 
         # Активные коды
         cursor.execute('''
-            SELECT code, quiz_name, xp_reward, max_uses, used_count, expires_at
-            FROM quiz_codes 
-            WHERE is_active = TRUE
-            ORDER BY created_at DESC
-            LIMIT 10
-        ''')
+                SELECT code, quiz_name, xp_reward, max_uses, used_count, expires_at
+                FROM quiz_codes 
+                WHERE is_active = TRUE
+                ORDER BY created_at DESC
+                LIMIT 10
+            ''')
         active_codes = cursor.fetchall()
 
         conn.close()
@@ -3370,11 +3286,11 @@ def handle_admin_broadcast_history(message):
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT id, message_text, sent_count, failed_count, status, created_at, sent_at, message_type
-            FROM broadcasts 
-            ORDER BY created_at DESC 
-            LIMIT 10
-        ''')
+                SELECT id, message_text, sent_count, failed_count, status, created_at, sent_at, message_type
+                FROM broadcasts 
+                ORDER BY created_at DESC 
+                LIMIT 10
+            ''')
 
         broadcasts = cursor.fetchall()
         conn.close()
@@ -3396,7 +3312,7 @@ def handle_admin_broadcast_history(message):
                     'failed': '❌'
                 }.get(status, '❓')
 
-                type_emoji = "📊" if msg_type == 'poll' else "📢"
+                type_emoji = "📊" if msg_type == 'button_poll' else "📢"
 
                 history_text += f"{status_emoji}{type_emoji} Рассылка #{broadcast_id}\n"
                 history_text += f"📝 {preview}\n"
@@ -3427,25 +3343,25 @@ def handle_admin_broadcast_history(message):
 
 
 def start_lottery_creation(message):
-    """Начинает процесс создания лотереи с улучшенной обработкой отмены"""
+    """Начинает процесс создания лотереи"""
     user_id = str(message.from_user.id)
     user_states[user_id] = 'creating_lottery'
 
     instruction = """🎪 СОЗДАНИЕ ЛОТЕРЕИ
 
-Отправьте данные в одном из форматов:
+    Отправьте данные в одном из форматов:
 
-1. Базовый формат (7 дней):
-Название|Описание|Цена_билета|Макс_билетов
+    1. Базовый формат (7 дней):
+    Название|Описание|Цена_билета|Макс_билетов
 
-2. Расширенный формат:
-Название|Описание|Цена_билета|Макс_билетов|Продолжительность_дней
+    2. Расширенный формат:
+    Название|Описание|Цена_билета|Макс_билетов|Продолжительность_дней
 
-Примеры:
-• Весенняя лотерея|Выиграй призы!|10|100
-• Большая лотерея|Главный приз 1000 баллов!|25|200|14
+    Примеры:
+    • Весенняя лотерея|Выиграй призы!|10|100
+    • Большая лотерея|Главный приз 1000 баллов!|25|200|14
 
-Для отмены нажмите кнопку '🔙 Отмена'"""
+    Для отмены нажмите кнопку '🔙 Отмена'"""
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("🔙 Отмена"))
@@ -3608,7 +3524,7 @@ def handle_admin_delete_finished_lotteries(message):
 
 
 def draw_lottery_manually(lottery_id):
-    """Ручной запуск розыгрыша лотереи с улучшенной обработкой ошибок"""
+    """Ручной запуск розыгрыша лотереи"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -3641,7 +3557,7 @@ def draw_lottery_manually(lottery_id):
 
 
 def handle_admin_draw_lottery(message):
-    """Обработчик запуска розыгрыша лотереи с улучшенной логикой"""
+    """Обработчик запуска розыгрыша лотереи"""
     user_id = str(message.from_user.id)
 
     try:
@@ -3741,12 +3657,12 @@ def create_loan(user_id, amount):
         next_interest_date = now + timedelta(hours=504)
 
         cursor.execute('''
-            INSERT INTO loans 
-            (user_id, amount, weekly_payment, next_principal_date, next_interest_date, status)
-            VALUES (?, ?, ?, ?, ?, 'active')
-        ''', (str(user_id), amount, weekly_payment,
-              next_principal_date.isoformat(),
-              next_interest_date.isoformat()))
+                INSERT INTO loans 
+                (user_id, amount, weekly_payment, next_principal_date, next_interest_date, status)
+                VALUES (?, ?, ?, ?, ?, 'active')
+            ''', (str(user_id), amount, weekly_payment,
+                  next_principal_date.isoformat(),
+                  next_interest_date.isoformat()))
 
         loan_id = cursor.lastrowid
 
@@ -3792,21 +3708,21 @@ def get_active_loans(user_id=None):
 
         if user_id:
             cursor.execute('''
-                SELECT id, user_id, amount, interest_rate, term_weeks, weekly_payment,
-                       interest_payment_cycle_hours, next_principal_date, next_interest_date,
-                       total_paid_principal, total_paid_interest, status, created_at
-                FROM loans 
-                WHERE user_id = ? AND status = 'active'
-                ORDER BY created_at DESC
-            ''', (str(user_id),))
+                    SELECT id, user_id, amount, interest_rate, term_weeks, weekly_payment,
+                           interest_payment_cycle_hours, next_principal_date, next_interest_date,
+                           total_paid_principal, total_paid_interest, status, created_at
+                    FROM loans 
+                    WHERE user_id = ? AND status = 'active'
+                    ORDER BY created_at DESC
+                ''', (str(user_id),))
         else:
             cursor.execute('''
-                SELECT id, user_id, amount, interest_rate, term_weeks, weekly_payment,
-                       interest_payment_cycle_hours, next_principal_date, next_interest_date,
-                       total_paid_principal, total_paid_interest, status, created_at
-                FROM loans WHERE status = 'active'
-                ORDER BY created_at DESC
-            ''')
+                    SELECT id, user_id, amount, interest_rate, term_weeks, weekly_payment,
+                           interest_payment_cycle_hours, next_principal_date, next_interest_date,
+                           total_paid_principal, total_paid_interest, status, created_at
+                    FROM loans WHERE status = 'active'
+                    ORDER BY created_at DESC
+                ''')
 
         loans = cursor.fetchall()
         conn.close()
@@ -3842,12 +3758,12 @@ def get_loan_info(user_id):
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT id, amount, weekly_payment, next_principal_date, next_interest_date, 
-                   total_paid_principal, total_paid_interest, status
-            FROM loans 
-            WHERE user_id = ? AND status = 'active'
-            ORDER BY created_at DESC
-        ''', (str(user_id),))
+                SELECT id, amount, weekly_payment, next_principal_date, next_interest_date, 
+                       total_paid_principal, total_paid_interest, status
+                FROM loans 
+                WHERE user_id = ? AND status = 'active'
+                ORDER BY created_at DESC
+            ''', (str(user_id),))
 
         loans = cursor.fetchall()
         conn.close()
@@ -4006,13 +3922,13 @@ def process_principal_payment(loan_id, user_id, weekly_payment, next_principal_d
         if success:
             # Обновляем данные по кредиту
             cursor.execute('''
-                UPDATE loans 
-                SET total_paid_principal = COALESCE(total_paid_principal, 0) + ?,
-                    next_principal_date = ?
-                WHERE id = ?
-            ''', (amount_to_deduct,
-                  (next_principal_date + timedelta(hours=168)).isoformat(),  # +7 дней
-                  loan_id))
+                    UPDATE loans 
+                    SET total_paid_principal = COALESCE(total_paid_principal, 0) + ?,
+                        next_principal_date = ?
+                    WHERE id = ?
+                ''', (amount_to_deduct,
+                      (next_principal_date + timedelta(hours=168)).isoformat(),  # +7 дней
+                      loan_id))
 
             # Проверяем, полностью ли погашен кредит
             cursor.execute('SELECT amount, total_paid_principal FROM loans WHERE id = ?', (loan_id,))
@@ -4102,13 +4018,13 @@ def process_interest_payment(loan_id, user_id, amount, interest_rate, next_inter
         if success:
             # Обновляем данные по кредиту
             cursor.execute('''
-                UPDATE loans 
-                SET total_paid_interest = COALESCE(total_paid_interest, 0) + ?,
-                    next_interest_date = ?
-                WHERE id = ?
-            ''', (interest_amount,
-                  (next_interest_date + timedelta(hours=504)).isoformat(),  # +21 день
-                  loan_id))
+                    UPDATE loans 
+                    SET total_paid_interest = COALESCE(total_paid_interest, 0) + ?,
+                        next_interest_date = ?
+                    WHERE id = ?
+                ''', (interest_amount,
+                      (next_interest_date + timedelta(hours=504)).isoformat(),  # +21 день
+                      loan_id))
 
         conn.commit()
         conn.close()
@@ -4187,23 +4103,23 @@ def send_purchase_notification(user_id, product, user, amount_from_balance, amou
 
         message_text = f"""🛒 НОВАЯ ПОКУПКА В МАГАЗИНЕ
 
-👤 Покупатель: {user.first_name or 'Неизвестно'}
-🆔 ID: {user_id}
-📱 Username: @{user.username or 'не указан'}
+    👤 Покупатель: {user.first_name or 'Неизвестно'}
+    🆔 ID: {user_id}
+    📱 Username: @{user.username or 'не указан'}
 
-🎁 Товар: {product['name']}
-💰 Стоимость: {product['price']} баллов
-💸 Списание: {payment_description}
+    🎁 Товар: {product['name']}
+    💰 Стоимость: {product['price']} баллов
+    💸 Списание: {payment_description}
 
-📊 Новые балансы покупателя:
-• Основные баллы: {new_balance}
-• Кредитные средства: {new_credit}
-• Всего: {new_balance + new_credit} баллов
+    📊 Новые балансы покупателя:
+    • Основные баллы: {new_balance}
+    • Кредитные средства: {new_credit}
+    • Всего: {new_balance + new_credit} баллов
 
-📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}
+    📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}
 
-✅ Баллы автоматически списаны
-⚠️ Необходимо выдать товар пользователю"""
+    ✅ Баллы автоматически списаны
+    ⚠️ Необходимо выдать товар пользователю"""
 
         bot.send_message(SUGGESTIONS_CHANNEL, message_text)
         print(f"✅ Уведомление о покупке отправлено в канал для пользователя {user_id}")
@@ -4257,12 +4173,12 @@ def start(message):
 
     welcome_text = f"""👋 Привет, {first_name}!
 
-Добро пожаловать в систему мотивации нооfuck'а! 🚀
+    Добро пожаловать в систему мотивации нооfuck'а! 🚀
 
-💡 Баланс автоматически синхронизируется с Google Таблицей.
-🔄 Изменения в таблице сразу отображаются в боте.
+    💡 Баланс автоматически синхронизируется с Google Таблицей.
+    🔄 Изменения в таблице сразу отображаются в боте.
 
-Выберите раздел:"""
+    Выберите раздел:"""
 
     bot.send_message(user_id, welcome_text, reply_markup=markup)
 
@@ -4386,9 +4302,9 @@ def handle_messages(message):
         elif current_state == 'creating_quiz_code':
             handle_quiz_code_creation(message)
             return
-        elif current_state in ['creating_tracked_poll_question', 'creating_tracked_poll_options',
-                               'creating_tracked_poll_type']:
-            handle_tracked_poll_creation(message)  # ВСЕ состояния опросов обрабатываются здесь
+        elif current_state in ['creating_button_poll_question', 'creating_button_poll_options',
+                               'creating_button_poll_type']:
+            handle_button_poll_creation(message)
             return
 
     # Обработка обычных команд
@@ -4409,11 +4325,11 @@ def handle_messages(message):
         "⚙️ Админ-панель": admin_broadcast_menu,
         "📊 Мои викторины": show_my_quizzes,
         "📢 Создать рассылку": lambda msg: start_broadcast_creation(msg),
-        "🎯 Создать отслеживаемый опрос": lambda msg: start_tracked_poll_creation(msg),
+        "🎯 Создать опрос на кнопках": lambda msg: start_button_poll_creation(msg),
         "📊 Статистика опросов": lambda msg: show_poll_statistics_menu(msg),
         "📊 Статистика рассылок": handle_admin_broadcast_stats,
         "📋 История рассылок": handle_admin_broadcast_history,
-        "🔧 Исправить балансы": lambda msg: show_balance_fix_menu(msg),  # ТОЧНО ЕСТЬ
+        "🔧 Исправить балансы": lambda msg: show_balance_fix_menu(msg),
         "🎪 Создать лотерею": lambda msg: start_lottery_creation(msg),
         "🔤 Создать код викторины": lambda msg: start_quiz_code_creation(msg),
         "📊 Статистика викторин": lambda msg: show_quiz_stats(msg),
@@ -4421,7 +4337,7 @@ def handle_messages(message):
         "🧹 Удалить завершенные лотереи": handle_admin_delete_finished_lotteries,
         "🎰 Запустить розыгрыш": handle_admin_draw_lottery,
         "🔄 Обновить кэш Google": handle_admin_refresh_cache,
-        "📊 Проверить мои транзакции": lambda msg: show_transaction_debug(msg),  # ТОЧНО ЕСТЬ
+        "📊 Проверить мои транзакции": lambda msg: show_transaction_debug(msg),
     }
 
     if message.text in handlers:
@@ -4434,7 +4350,7 @@ def handle_messages(message):
         try:
             poll_id_str = message.text.split(":")[0].replace("📊 ", "").strip()
             poll_id = int(poll_id_str)
-            show_simple_poll_statistics(message, poll_id)
+            show_poll_statistics(message, poll_id)
         except ValueError:
             bot.send_message(user_id, "❌ Неверный ID опроса")
     else:
@@ -4717,41 +4633,41 @@ def show_rules(message):
 def show_penalties(message):
     penalties_text = """⚡ Штрафы
 
-🔴 НАРУШЕНИЯ И ШТРАФЫ 
+    🔴 НАРУШЕНИЯ И ШТРАФЫ 
 
-*В этом разделе вы сможете посмотреть за что начисляются штрафные санкции в системе мотивации 🚀 нооFuck'а*
+    *В этом разделе вы сможете посмотреть за что начисляются штрафные санкции в системе мотивации 🚀 нооFuck'а*
 
-━━━━━━━━━━━━━━━━━━━━
+    ━━━━━━━━━━━━━━━━━━━━
 
-📋 КАТЕГОРИИ ШТРАФОВ:
+    📋 КАТЕГОРИИ ШТРАФОВ:
 
-❌ Просроченные ДД:
-   • Первые 2 просрочки → 0 баллов
-   • Каждая последующая → 🔴 -20 баллов
+    ❌ Просроченные ДД:
+       • Первые 2 просрочки → 0 баллов
+       • Каждая последующая → 🔴 -20 баллов
 
-🚫 Серьезные нарушения:
-   • Несданный зачет → 🔴 -20 баллов
-   • Несданный авторский пробник → 🔴 -30 баллов
-   • Пропущен дедлайн от куратора → 🔴 -15 баллов
-   • Перенос дедлайна ДЗ без предупреждения → 🔴 -10 баллов
-   • Перенос дедлайна пробника без предупреждения → 🔴 -15 баллов
-   • Нет ответа в ЛС за 24 часа → 🔴 -20 баллов
-   • Перенос ДЗ более двух раз → 🔴 -20 баллов
-   • Неверная кодовая фраза → 🔴 -10 баллов
-   • Не сдана рубежная аттестация → 🔴 -25 баллов
+    🚫 Серьезные нарушения:
+       • Несданный зачет → 🔴 -20 баллов
+       • Несданный авторский пробник → 🔴 -30 баллов
+       • Пропущен дедлайн от куратора → 🔴 -15 баллов
+       • Перенос дедлайна ДЗ без предупреждения → 🔴 -10 баллов
+       • Перенос дедлайна пробника без предупреждения → 🔴 -15 баллов
+       • Нет ответа в ЛС за 24 часа → 🔴 -20 баллов
+       • Перенос ДЗ более двух раз → 🔴 -20 баллов
+       • Неверная кодовая фраза → 🔴 -10 баллов
+       • Не сдана рубежная аттестация → 🔴 -25 баллов
 
-━━━━━━━━━━━━━━━━━━━━
+    ━━━━━━━━━━━━━━━━━━━━
 
-💡 ПОЛЕЗНАЯ ИНФОРМАЦИЯ:
+    💡 ПОЛЕЗНАЯ ИНФОРМАЦИЯ:
 
-✅ Как избежать штрафов?
-   • Своевременно выполнять ДЗ
-   • Следить за дедлайнами
-   • Консультироваться при трудностях
+    ✅ Как избежать штрафов?
+       • Своевременно выполнять ДЗ
+       • Следить за дедлайнами
+       • Консультироваться при трудностях
 
-📊 Где посмотреть историю?
-   • Раздел "История зачислений"
-   • В вашем профиле "Профиль"""
+    📊 Где посмотреть историю?
+       • Раздел "История зачислений"
+       • В вашем профиле "Профиль"""
     bot.send_message(message.from_user.id, penalties_text)
 
 
@@ -4778,18 +4694,18 @@ def show_credit_menu(message):
 
     credit_info = """💰 СИСТЕМА КРЕДИТОВ 💰
 
-Условия кредита:
-• 🏦 Максимальная сумма: 250 баллов
-• 📈 Проценты: 14% каждые 504 часа (21 день)
-• 💸 Платеж: 1/12 от суммы каждые 168 часов (7 дней)
-• ⏱️ Полное погашение: 12 недель
+    Условия кредита:
+    • 🏦 Максимальная сумма: 250 баллов
+    • 📈 Проценты: 14% каждые 504 часа (21 день)
+    • 💸 Платеж: 1/12 от суммы каждые 168 часов (7 дней)
+    • ⏱️ Полное погашение: 12 недель
 
-Пример расчета:
-Кредит 120 баллов:
-• Еженедельный платеж: 10 баллов
-• Проценты каждые 3 недели: 16.8 баллов
+    Пример расчета:
+    Кредит 120 баллов:
+    • Еженедельный платеж: 10 баллов
+    • Проценты каждые 3 недели: 16.8 баллов
 
-⚠️ Внимание: Кредит списывается автоматически!"""
+    ⚠️ Внимание: Кредит списывается автоматически!"""
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("📝 Взять кредит"))
@@ -4838,20 +4754,20 @@ def handle_credit_amount(message):
 
             loan_info = f"""✅ КРЕДИТ ОДОБРЕН!
 
-📋 Детали кредита:
-• 💳 Сумма: {amount} баллов
-• 🆔 Номер кредита: #{loan_id}
-• 💸 Еженедельный платеж: {amount // 12} баллов
-• 📈 Проценты: 14% каждые 21 день
-• ⏱️ Срок: 12 недель
+    📋 Детали кредита:
+    • 💳 Сумма: {amount} баллов
+    • 🆔 Номер кредита: #{loan_id}
+    • 💸 Еженедельный платеж: {amount // 12} баллов
+    • 📈 Проценты: 14% каждые 21 день
+    • ⏱️ Срок: 12 недель
 
-💰 Балансы:
-   • Основные баллы: {balance_before} → {balance_after}
-   • Кредитные средства: {credit_before} → {credit_after}
+    💰 Балансы:
+       • Основные баллы: {balance_before} → {balance_after}
+       • Кредитные средства: {credit_before} → {credit_after}
 
-✅ Кредитные средства начислены на ваш счет!
+    ✅ Кредитные средства начислены на ваш счет!
 
-⚠️ Платежи будут списываться автоматически."""
+    ⚠️ Платежи будут списываться автоматически."""
 
             bot.send_message(user_id, loan_info, reply_markup=markup)
         else:
@@ -4879,14 +4795,14 @@ def show_purchases(message):
 
     shop_text = f"""🛒 МАГАЗИН БАЛЛОВ
 
-Здесь вы можете обменять баллы на полезные товары и услуги!
+    Здесь вы можете обменять баллы на полезные товары и услуги!
 
-💼 Ваши средства:
-💰 Основные баллы: {balance}
-🏦 Кредитные средства: {credit_balance}
-💳 Всего доступно: {total_available} баллов
+    💼 Ваши средства:
+    💰 Основные баллы: {balance}
+    🏦 Кредитные средства: {credit_balance}
+    💳 Всего доступно: {total_available} баллов
 
-Выберите категорию:"""
+    Выберите категорию:"""
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
 
@@ -4952,14 +4868,14 @@ def show_product_details(message, product_id):
 
     product_text = f"""🎁 {product['name']}
 
-{product['description']}
+    {product['description']}
 
-💰 Цена: {product['price']} баллов
+    💰 Цена: {product['price']} баллов
 
-💼 Ваши средства:
-• Основные баллы: {balance}
-• Кредитные средства: {credit_balance}
-• Всего доступно: {total_available}"""
+    💼 Ваши средства:
+    • Основные баллы: {balance}
+    • Кредитные средства: {credit_balance}
+    • Всего доступно: {total_available}"""
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
 
@@ -5076,15 +4992,15 @@ def admin_panel(message):
 
     admin_text = """⚙️ ПАНЕЛЬ АДМИНИСТРАТОРА
 
-Доступные команды:
-• /stats - Статистика бота
-• /users - Список пользователей
-• /loans - Активные кредиты
-• /broadcast - Быстрая рассылка
-• /createlottery - Создать лотерею
-• /refresh_cache - Обновить кэш Google
-• /create_quiz_code - Создать код викторины
-• /quiz_stats - Статистика викторин"""
+    Доступные команды:
+    • /stats - Статистика бота
+    • /users - Список пользователей
+    • /loans - Активные кредиты
+    • /broadcast - Быстрая рассылка
+    • /createlottery - Создать лотерею
+    • /refresh_cache - Обновить кэш Google
+    • /create_quiz_code - Создать код викторины
+    • /quiz_stats - Статистика викторин"""
 
     bot.send_message(user_id, admin_text)
 
@@ -5144,31 +5060,31 @@ def show_stats(message):
         cursor.execute('SELECT SUM(sent_count) FROM broadcasts WHERE status = "sent"')
         total_messages_sent = cursor.fetchone()[0] or 0
 
-        # Статистика отслеживаемых опросов
-        cursor.execute('SELECT COUNT(*) FROM tracked_poll_responses WHERE selected_options IS NOT NULL')
+        # Статистика опросов
+        cursor.execute('SELECT COUNT(*) FROM poll_responses WHERE selected_options IS NOT NULL')
         total_poll_responses = cursor.fetchone()[0]
 
         conn.close()
 
         stats_text = f"""📊 СТАТИСТИКА БОТА
 
-👥 Пользователей: {total_users}
-💳 Транзакций: {total_transactions}
-🏦 Активных кредитов: {active_loans}
-💰 Сумма активных кредитов: {total_loans_amount} баллов
-🎁 Пользователей с бонусами: {total_bonus_users}
-🎊 Всего выдано бонусов: {total_bonus_given} баллов
-🏆 Пользователей с уровнями: {total_level_users}
-⭐ Средний уровень: {avg_level:.1f}
-🎪 Активных лотерей: {active_lotteries}
-🎫 Продано лотерейных билетов: {total_tickets_sold}
-🎯 Кодов викторин: {total_quiz_codes}
-📝 Пройдено викторин: {total_quiz_completions}
-💫 Опыта за викторины: {total_quiz_xp}
-📢 Рассылок отправлено: {total_broadcasts}
-📨 Сообщений рассылки: {total_messages_sent}
-📊 Ответов на опросы: {total_poll_responses}
-⏰ Время работы: {datetime.now().strftime('%d.%m.%Y %H:%M')}"""
+    👥 Пользователей: {total_users}
+    💳 Транзакций: {total_transactions}
+    🏦 Активных кредитов: {active_loans}
+    💰 Сумма активных кредитов: {total_loans_amount} баллов
+    🎁 Пользователей с бонусами: {total_bonus_users}
+    🎊 Всего выдано бонусов: {total_bonus_given} баллов
+    🏆 Пользователей с уровнями: {total_level_users}
+    ⭐ Средний уровень: {avg_level:.1f}
+    🎪 Активных лотерей: {active_lotteries}
+    🎫 Продано лотерейных билетов: {total_tickets_sold}
+    🎯 Кодов викторин: {total_quiz_codes}
+    📝 Пройдено викторин: {total_quiz_completions}
+    💫 Опыта за викторины: {total_quiz_xp}
+    📢 Рассылок отправлено: {total_broadcasts}
+    📨 Сообщений рассылки: {total_messages_sent}
+    📊 Ответов на опросы: {total_poll_responses}
+    ⏰ Время работы: {datetime.now().strftime('%d.%m.%Y %H:%M')}"""
 
         bot.send_message(message.chat.id, stats_text)
 
@@ -5327,19 +5243,19 @@ def quiz_stats_command(message):
 
         # Статистика по кодам
         cursor.execute('''
-            SELECT COUNT(*) as total_codes,
-                   SUM(used_count) as total_uses,
-                   AVG(used_count) as avg_uses
-            FROM quiz_codes
-        ''')
+                SELECT COUNT(*) as total_codes,
+                       SUM(used_count) as total_uses,
+                       AVG(used_count) as avg_uses
+                FROM quiz_codes
+            ''')
         code_stats = cursor.fetchone()
 
         # Статистика по пользователям
         cursor.execute('''
-            SELECT COUNT(DISTINCT user_id) as unique_users,
-                   SUM(xp_earned) as total_xp_given
-            FROM quiz_code_usage
-        ''')
+                SELECT COUNT(DISTINCT user_id) as unique_users,
+                       SUM(xp_earned) as total_xp_given
+                FROM quiz_code_usage
+            ''')
         user_stats = cursor.fetchone()
 
         # Активные коды
@@ -5382,24 +5298,6 @@ if __name__ == '__main__':
     print("🔄 Обновляем структуру базы данных...")
     upgrade_database()
 
-    # Проверяем структуру
-    print("🔍 Проверяем структуру базы данных...")
-    check_database_structure()
-    print("✅ Все системы активированы:")
-    print("   • 💰 Балансы и транзакции (с автоматической синхронизацией Google)")
-    print("   • 🏆 Система уровней и опыта")
-    print("   • 🎪 Лотереи и розыгрыши")
-    print("   • 📢 Система уведомлений и рассылок")
-    print("   • 🎁 Ежедневные бонусы")
-    print("   • 💸 Кредитная система")
-    print("   • 🛒 Магазин товаров")
-    print("   • 🎯 Система викторин с кодовыми словами")
-    print("   • 🎯 Система отслеживаемых опросов")
-    print("=" * 50)
-
-    test_data = load_google_sheets_data()
-    print(f"📊 Загружено пользователей из Google Sheets: {len(test_data)}")
-
     # Создаем тестовые коды викторин
     create_initial_quiz_codes()
 
@@ -5411,4 +5309,3 @@ if __name__ == '__main__':
         print("🔄 Перезапускаем бота...")
         time.sleep(5)
         bot.infinity_polling(timeout=60, long_polling_timeout=60)
-
