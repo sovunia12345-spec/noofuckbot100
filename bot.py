@@ -386,14 +386,25 @@ def upgrade_database():
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Обновление таблицы broadcasts для кнопочных опросов
+        # Проверяем существующие колонки в broadcasts
         cursor.execute("PRAGMA table_info(broadcasts)")
         columns = [column[1] for column in cursor.fetchall()]
+        print(f"🔍 Существующие колонки в broadcasts: {columns}")
 
-        # Добавляем поле для типа опроса если его нет
-        if 'allows_multiple_answers' not in columns:
-            cursor.execute('ALTER TABLE broadcasts ADD COLUMN allows_multiple_answers BOOLEAN DEFAULT FALSE')
-            print("✅ Поле allows_multiple_answers добавлено в broadcasts")
+        # Колонки которые нужно добавить
+        required_columns = {
+            'poll_question': 'TEXT',
+            'poll_options': 'TEXT',
+            'allows_multiple_answers': 'BOOLEAN DEFAULT FALSE',
+            'is_anonymous': 'BOOLEAN DEFAULT TRUE'
+        }
+
+        # Добавляем недостающие колонки
+        for column_name, column_type in required_columns.items():
+            if column_name not in columns:
+                print(f"🔄 Добавляем колонку {column_name}...")
+                cursor.execute(f'ALTER TABLE broadcasts ADD COLUMN {column_name} {column_type}')
+                print(f"✅ Колонка {column_name} добавлена")
 
         conn.commit()
         conn.close()
@@ -401,6 +412,8 @@ def upgrade_database():
 
     except Exception as e:
         print(f"❌ Ошибка обновления БД: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 # Инициализируем БД
@@ -5408,14 +5421,19 @@ def refresh_cache_command(message):
 
 
 # ================== ЗАПУСК БОТА ==================
-# Проверяем базу данных при запуске
-print("🔍 Запускаем проверку базы данных...")
-check_database_structure()
 
 if __name__ == '__main__':
     print("=" * 50)
     print("🚀 БОТ ЗАПУЩЕН")
     print("=" * 50)
+
+    # Обновляем базу данных
+    print("🔄 Обновляем структуру базы данных...")
+    upgrade_database()
+
+    # Проверяем структуру
+    print("🔍 Проверяем структуру базы данных...")
+    check_database_structure()
     print("✅ Все системы активированы:")
     print("   • 💰 Балансы и транзакции (с автоматической синхронизацией Google)")
     print("   • 🏆 Система уровней и опыта")
