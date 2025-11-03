@@ -2177,10 +2177,13 @@ def handle_my_tickets(call):
 def create_tracked_poll(admin_id, question, options, allows_multiple_answers=False):
     """Создает отслеживаемый опрос на кнопках"""
     try:
+        print(f"🔍 Создание опроса: вопрос='{question}', варианты={options}, множественный={allows_multiple_answers}")
+
         conn = get_db_connection()
         cursor = conn.cursor()
 
         poll_options_json = json.dumps(options, ensure_ascii=False)
+        print(f"🔍 JSON вариантов: {poll_options_json}")
 
         cursor.execute('''
             INSERT INTO broadcasts (admin_id, message_text, message_type, 
@@ -2194,8 +2197,11 @@ def create_tracked_poll(admin_id, question, options, allows_multiple_answers=Fal
 
         print(f"✅ Создан опрос #{poll_id}: {question} (множественный: {allows_multiple_answers})")
         return poll_id
+
     except Exception as e:
         print(f"❌ Ошибка создания опроса: {e}")
+        import traceback
+        traceback.print_exc()  # Покажет полную трассировку ошибки
         return None
 
 
@@ -2705,6 +2711,7 @@ def start_tracked_poll_creation(message):
 
     bot.send_message(user_id, instruction, reply_markup=markup)
 
+
 def handle_tracked_poll_creation(message):
     """Обрабатывает создание отслеживаемого опроса"""
     user_id = str(message.from_user.id)
@@ -2716,10 +2723,11 @@ def handle_tracked_poll_creation(message):
         admin_broadcast_menu(message)
         return
 
-    # Обработка выбора типа опроса
     if user_states.get(user_id) == 'creating_tracked_poll_type':
         question = user_states.get(f"{user_id}_tracked_poll_question")
         options = user_states.get(f"{user_id}_tracked_poll_options")
+
+        print(f"🔍 Получены данные: вопрос='{question}', варианты={options}")
 
         if message.text == "✅ Один вариант":
             allows_multiple = False
@@ -2730,6 +2738,7 @@ def handle_tracked_poll_creation(message):
             return
 
         # Создаем отслеживаемый опрос
+        print(f"🔍 Создаем опрос с параметрами...")
         poll_id = create_tracked_poll(user_id, question, options, allows_multiple)
 
         if poll_id:
@@ -2746,18 +2755,23 @@ def handle_tracked_poll_creation(message):
             bot.send_message(user_id, success_msg)
 
             # Отправляем опрос
+            print(f"🔍 Отправляем опрос #{poll_id} пользователям...")
             success, result = send_tracked_poll(poll_id)
 
             if success:
                 final_msg = f"""🎉 ОПРОС ОТПРАВЛЕН!
 
 {result}"""
-
                 bot.send_message(user_id, final_msg)
             else:
                 bot.send_message(user_id, f"❌ Ошибка отправки:\n{result}")
+
+            # Возвращаем в админ-меню
+            admin_broadcast_menu(message)
+
         else:
-            bot.send_message(user_id, "❌ Ошибка создания опроса")
+            bot.send_message(user_id, "❌ Ошибка создания опроса. Проверьте логи.")
+            admin_broadcast_menu(message)
 
         # Очищаем состояния
         user_states[user_id] = None
@@ -2766,7 +2780,6 @@ def handle_tracked_poll_creation(message):
         if f"{user_id}_tracked_poll_options" in user_states:
             del user_states[f"{user_id}_tracked_poll_options"]
 
-    # Обработка ввода вариантов ответов
     elif user_states.get(user_id) == 'creating_tracked_poll_options':
         question = user_states.get(f"{user_id}_tracked_poll_question")
         options = [opt.strip() for opt in message.text.split(',') if opt.strip()]
@@ -2791,7 +2804,6 @@ def handle_tracked_poll_creation(message):
             reply_markup=markup
         )
 
-    # Обработка ввода вопроса
     elif user_states.get(user_id) == 'creating_tracked_poll_question':
         question = message.text.strip()
         if len(question) < 5:
@@ -2812,6 +2824,34 @@ def handle_tracked_poll_creation(message):
             reply_markup=markup
         )
 
+
+def check_database_structure():
+    """Проверяет структуру базы данных"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Проверяем таблицу broadcasts
+        cursor.execute("PRAGMA table_info(broadcasts)")
+        columns = cursor.fetchall()
+        print("📋 Структура таблицы broadcasts:")
+        for col in columns:
+            print(f"   {col[1]} ({col[2]})")
+
+        # Проверяем существующие опросы
+        cursor.execute("SELECT id, message_type, poll_question FROM broadcasts WHERE message_type LIKE '%poll%'")
+        polls = cursor.fetchall()
+        print(f"📊 Найдено опросов: {len(polls)}")
+        for poll in polls:
+            print(f"   ID: {poll[0]}, Тип: {poll[1]}, Вопрос: {poll[2]}")
+
+        conn.close()
+    except Exception as e:
+        print(f"❌ Ошибка проверки БД: {e}")
+
+
+# Вызовите эту функцию при запуске бота
+check_database_structure()
 
 # ================== СИСТЕМА РАССЫЛОК И УВЕДОМЛЕНИЙ ==================
 def create_broadcast(admin_id, message_text, message_type='text', file_id=None,
@@ -5368,6 +5408,10 @@ def refresh_cache_command(message):
 
 
 # ================== ЗАПУСК БОТА ==================
+# Проверяем базу данных при запуске
+print("🔍 Запускаем проверку базы данных...")
+check_database_structure()
+
 if __name__ == '__main__':
     print("=" * 50)
     print("🚀 БОТ ЗАПУЩЕН")
