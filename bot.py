@@ -2861,15 +2861,15 @@ def create_broadcast(admin_id, message_text, message_type='text', file_id=None,
 
 
 def send_broadcast(broadcast_id):
-    """Отправляет рассылку всем пользователям"""
+    """Отправляет рассылку всем пользователям с улучшенной обработкой файлов"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
         cursor.execute('''
-                SELECT message_text, message_type, file_id
-                FROM broadcasts WHERE id = ?
-            ''', (broadcast_id,))
+            SELECT message_text, message_type, file_id
+            FROM broadcasts WHERE id = ?
+        ''', (broadcast_id,))
 
         broadcast = cursor.fetchone()
 
@@ -2893,22 +2893,24 @@ def send_broadcast(broadcast_id):
                 if message_type == 'photo' and file_id:
                     bot.send_photo(user_id, file_id, caption=message_text)
                 elif message_type == 'document' and file_id:
+                    # Отправляем документ с подписью
                     bot.send_document(user_id, file_id, caption=message_text)
                 else:
+                    # Текстовая рассылка
                     bot.send_message(user_id, message_text)
 
                 sent_count += 1
-                time.sleep(0.1)
+                time.sleep(0.1)  # Задержка чтобы не превысить лимиты Telegram
 
             except Exception as e:
                 print(f"❌ Ошибка отправки пользователю {user_id}: {e}")
                 failed_count += 1
 
         cursor.execute('''
-                UPDATE broadcasts 
-                SET sent_count = ?, failed_count = ?, status = 'sent', sent_at = ?
-                WHERE id = ?
-            ''', (sent_count, failed_count, datetime.now().isoformat(), broadcast_id))
+            UPDATE broadcasts 
+            SET sent_count = ?, failed_count = ?, status = 'sent', sent_at = ?
+            WHERE id = ?
+        ''', (sent_count, failed_count, datetime.now().isoformat(), broadcast_id))
 
         conn.commit()
         conn.close()
@@ -2976,6 +2978,139 @@ def send_user_notification(user_id, notification_type, title, message, related_i
         return False
 
 
+@bot.message_handler(content_types=['document'])
+def handle_document(message):
+    """Обработчик документов от администраторов для рассылок"""
+    user_id = str(message.from_user.id)
+
+    if not is_admin(message.from_user.id):
+        return
+
+    # Проверяем, находится ли администратор в режиме создания рассылки
+    if user_id in user_states and user_states[user_id] == 'creating_broadcast':
+        try:
+            file_id = message.document.file_id
+            file_name = message.document.file_name
+
+            # Сохраняем file_id для использования в рассылке
+            user_states[f"{user_id}_broadcast_file_id"] = file_id
+            user_states[f"{user_id}_broadcast_file_name"] = file_name
+            user_states[f"{user_id}_broadcast_type"] = 'document'
+
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+            markup.add(types.KeyboardButton("📝 Без текста"))
+            markup.add(types.KeyboardButton("🔙 Отмена"))
+
+            bot.send_message(
+                user_id,
+                f"📎 Файл получен: {file_name}\n\n"
+                f"Теперь введите текст сообщения (будет подписью к файлу):\n\n"
+                f"Или нажмите '📝 Без текста' для отправки только файла",
+                reply_markup=markup
+            )
+
+        except Exception as e:
+            print(f"❌ Ошибка обработки документа: {e}")
+            bot.send_message(user_id, "❌ Ошибка при обработке файла")
+
+    elif user_id in user_states and user_states[user_id] == 'creating_broadcast_text':
+        # Если администратор уже ввел текст и теперь отправляет файл
+        handle_broadcast_with_file(message)
+
+
+def handle_broadcast_with_file(message):
+    """Обработчик когда администратор отправил текст и затем файл"""
+    user_id = str(message.from_user.id)
+
+    try:
+        if message.content_type == 'document':
+            file_id = message.document.file_id
+            file_name = message.document.file_name
+            broadcast_text = user_states.get(f"{user_id}_broadcast_text", "")
+
+            # Создаем рассылку с файлом
+            broadcast_id = create_broadcast(
+                user_id,
+                broadcast_text,
+                'document',
+                file_id
+            )
+
+            if broadcast_id:
+                # Отправляем тестовое сообщение администратору
+                try:
+                    bot.send_document(user_id, file_id, caption=broadcast_text)
+                    bot.send_message(user_id, f"✅ Файл '{file_name}' добавлен к рассылке!")
+                except:
+                    pass
+
+                # Запускаем рассылку
+                success, result = send_broadcast(broadcast_id)
+
+                if success:
+                    bot.send_message(user_id, f"✅ Рассылка с файлом создана и отправлена!\n\n{result}")
+                else:
+                    bot.send_message(user_id, f"❌ Рассылка создана, но возникли ошибки при отправке:\n{result}")
+            else:
+                bot.send_message(user_id, "❌ Ошибка создания рассылки")
+
+            # Очищаем состояния
+            user_states[user_id] = None
+            if f"{user_id}_broadcast_text" in user_states:
+                del user_states[f"{user_id}_broadcast_text"]
+
+            admin_broadcast_menu(message)
+
+    except Exception as e:
+        bot.send_message(user_id, f"❌ Ошибка при обработке файла: {e}")
+        user_states[user_id] = None
+
+
+@bot.message_handler(commands=['broadcast_pdf'])
+@admin_required
+def quick_broadcast_pdf(message):
+    """Быстрая рассылка PDF файла"""
+    user_id = message.from_user.id
+
+    if not message.reply_to_message or not message.reply_to_message.document:
+        bot.send_message(user_id,
+                         "❌ Использование:\n"
+                         "1. Отправьте боту PDF файл\n"
+                         "2. Ответьте на файл командой /broadcast_pdf [текст_подписи]\n\n"
+                         "Пример: /broadcast_pdf Важное обновление!")
+        return
+
+    try:
+        file_id = message.reply_to_message.document.file_id
+        file_name = message.reply_to_message.document.file_name
+        caption = message.text.replace('/broadcast_pdf', '').strip()
+
+        # Создаем рассылку
+        broadcast_id = create_broadcast(
+            user_id,
+            caption,
+            'document',
+            file_id
+        )
+
+        if broadcast_id:
+            success, result = send_broadcast(broadcast_id)
+
+            if success:
+                bot.send_message(user_id,
+                                 f"✅ PDF рассылка отправлена!\n"
+                                 f"📎 Файл: {file_name}\n"
+                                 f"📝 Подпись: {caption}\n\n"
+                                 f"{result}")
+            else:
+                bot.send_message(user_id, f"❌ Ошибка при отправке:\n{result}")
+        else:
+            bot.send_message(user_id, "❌ Ошибка создания рассылки")
+
+    except Exception as e:
+        bot.send_message(user_id, f"❌ Ошибка: {e}")
+
+
 # ================== ИСПРАВЛЕННЫЕ ФУНКЦИИ АДМИНИСТРАТОРА ==================
 @admin_required
 def admin_broadcast_menu(message):
@@ -3004,36 +3139,134 @@ def start_broadcast_creation(message):
     user_id = str(message.from_user.id)
     user_states[user_id] = 'creating_broadcast'
 
+    instruction = """✍️ СОЗДАНИЕ РАССЫЛКИ
+
+Вы можете:
+1. 📝 Отправить текстовую рассылку
+2. 📎 Прислать файл (PDF, Word, Excel и др.)
+3. 📝 Прислать текст, а затем файл
+
+Файл будет отправлен как документ с вашим текстом в качестве подписи.
+
+Введите текст рассылки ИЛИ отправьте файл:
+
+Для отмены нажмите кнопку '🔙 Отмена'"""
+
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("🔙 Отмена"))
 
     bot.send_message(
         user_id,
-        "✍️ Введите текст рассылки:\n\n"
-        "Для отмены нажмите кнопку '🔙 Отмена'",
+        instruction,
         reply_markup=markup,
         parse_mode='Markdown'
     )
 
 
 def handle_admin_broadcast_creation(message):
-    """Обработчик создания рассылки"""
+    """Обработчик создания рассылки с поддержкой файлов"""
     user_id = str(message.from_user.id)
 
     if message.text in ["🔙 Отмена", "🔙 Назад", "🔙 В меню"]:
+        # Очищаем состояния
         user_states[user_id] = None
+        if f"{user_id}_broadcast_file_id" in user_states:
+            del user_states[f"{user_id}_broadcast_file_id"]
+        if f"{user_id}_broadcast_file_name" in user_states:
+            del user_states[f"{user_id}_broadcast_file_name"]
+        if f"{user_id}_broadcast_type" in user_states:
+            del user_states[f"{user_id}_broadcast_type"]
         start(message)
         return
 
     if user_id in user_states and user_states[user_id] == 'creating_broadcast':
         try:
-            broadcast_text = message.text
+            # Проверяем, есть ли уже файл
+            has_file = f"{user_id}_broadcast_file_id" in user_states
 
-            if len(broadcast_text.strip()) < 5:
-                bot.send_message(user_id, "❌ Текст рассылки слишком короткий. Минимум 5 символов.")
-                return
+            if has_file:
+                # Файл уже загружен, обрабатываем текст
+                file_id = user_states[f"{user_id}_broadcast_file_id"]
+                file_name = user_states[f"{user_id}_broadcast_file_name"]
+                message_type = user_states[f"{user_id}_broadcast_type"]
 
-            broadcast_id = create_broadcast(user_id, broadcast_text)
+                if message.text == "📝 Без текста":
+                    broadcast_text = ""
+                else:
+                    broadcast_text = message.text
+
+                # Создаем рассылку с файлом
+                broadcast_id = create_broadcast(
+                    user_id,
+                    broadcast_text,
+                    message_type,
+                    file_id
+                )
+
+                if broadcast_id:
+                    # Отправляем тестовое сообщение администратору
+                    try:
+                        if message_type == 'document':
+                            bot.send_document(user_id, file_id, caption=broadcast_text)
+                        bot.send_message(user_id, f"✅ Файл '{file_name}' готов к рассылке!")
+                    except:
+                        pass
+
+                    # Запускаем рассылку
+                    success, result = send_broadcast(broadcast_id)
+
+                    if success:
+                        bot.send_message(user_id, f"✅ Рассылка создана и отправлена!\n\n{result}")
+                    else:
+                        bot.send_message(user_id, f"❌ Рассылка создана, но возникли ошибки при отправке:\n{result}")
+                else:
+                    bot.send_message(user_id, "❌ Ошибка создания рассылки")
+
+                # Очищаем состояния
+                user_states[user_id] = None
+                if f"{user_id}_broadcast_file_id" in user_states:
+                    del user_states[f"{user_id}_broadcast_file_id"]
+                if f"{user_id}_broadcast_file_name" in user_states:
+                    del user_states[f"{user_id}_broadcast_file_name"]
+                if f"{user_id}_broadcast_type" in user_states:
+                    del user_states[f"{user_id}_broadcast_type"]
+
+                admin_broadcast_menu(message)
+
+            else:
+                # Нет файла, создаем текстовую рассылку или ждем файл
+                if len(message.text.strip()) < 1:
+                    bot.send_message(user_id, "❌ Текст рассылки не может быть пустым.")
+                    return
+
+                # Сохраняем текст и ждем возможный файл
+                user_states[f"{user_id}_broadcast_text"] = message.text
+                user_states[user_id] = 'creating_broadcast_text'
+
+                markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+                markup.add(types.KeyboardButton("🚀 Отправить без файла"))
+                markup.add(types.KeyboardButton("🔙 Отмена"))
+
+                bot.send_message(
+                    user_id,
+                    f"✅ Текст сохранен!\n\n"
+                    f"Теперь вы можете:\n"
+                    f"• 📎 Отправить файл (PDF, Word, Excel)\n"
+                    f"• 🚀 Начать рассылку без файла\n\n"
+                    f"Текст рассылки:\n{message.text}",
+                    reply_markup=markup
+                )
+
+        except Exception as e:
+            bot.send_message(user_id, f"❌ Ошибка при создании рассылки: {e}")
+            user_states[user_id] = None
+
+    elif user_id in user_states and user_states[user_id] == 'creating_broadcast_text':
+        # Обработка выбора после ввода текста
+        if message.text == "🚀 Отправить без файла":
+            # Создаем текстовую рассылку
+            broadcast_text = user_states[f"{user_id}_broadcast_text"]
+            broadcast_id = create_broadcast(user_id, broadcast_text, 'text')
 
             if broadcast_id:
                 success, result = send_broadcast(broadcast_id)
@@ -3045,11 +3278,12 @@ def handle_admin_broadcast_creation(message):
             else:
                 bot.send_message(user_id, "❌ Ошибка создания рассылки")
 
-        except Exception as e:
-            bot.send_message(user_id, f"❌ Ошибка при создании рассылки: {e}")
+            # Очищаем состояния
+            user_states[user_id] = None
+            if f"{user_id}_broadcast_text" in user_states:
+                del user_states[f"{user_id}_broadcast_text"]
 
-        user_states[user_id] = None
-        admin_broadcast_menu(message)
+            admin_broadcast_menu(message)
 
 
 def handle_admin_broadcast_stats(message):
